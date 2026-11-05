@@ -168,7 +168,7 @@
       box.className = "sharebox";
       const url = location.origin + location.pathname + "?s=" + BLOB;
       box.innerHTML = `<strong>Lien à partager</strong><input type="text" readonly id="aw-share" aria-label="Lien à partager"><button class="btn" type="button" id="aw-copy">Copier</button><span class="ok" id="aw-copied"></span>
-        <p class="hint">Ce navigateur est reconnu comme organisateur. Pour l'être sur un autre ordinateur, gardez ce lien privé : <a href="#" id="aw-orglink">copier mon lien organisateur</a>.</p>`;
+        <p class="hint">Ce navigateur est reconnu comme organisateur. Pour l'être aussi sur un autre ordinateur, <a href="#" id="aw-orglink">copiez votre lien organisateur</a> et gardez-le pour vous.</p>`;
       document.getElementById("admin").prepend(box);
       box.querySelector("#aw-share").value = url;
       const copy = async (t, el) => { try { await navigator.clipboard.writeText(t); el.textContent = "Copié !"; } catch { const i = box.querySelector("#aw-share"); i.value = t; i.select(); el.textContent = "Sélectionné : copiez-le (Ctrl+C)."; } };
@@ -180,7 +180,7 @@
     document.querySelector(".wrap").hidden = true;
     const box = document.createElement("div");
     box.className = "setup";
-    box.innerHTML = `<div class="hero"><h1>Afterworks Selfee <span aria-hidden="true">🥂</span></h1><span class="tag">Qui ? Quoi ? Quand ?</span></div>
+    box.innerHTML = `<div class="hero"><h1>Afterworks Selfee <span aria-hidden="true">🥂</span></h1><span class="tag">Qui&nbsp;? Quoi&nbsp;? Quand&nbsp;?</span></div>
       <p>Première ouverture : créez l'espace de vote. Vous recevrez un lien à partager et deviendrez l'organisateur sur ce navigateur.</p>
       <button class="btn" id="aw-create">Créer l'espace de vote</button><p class="msg" id="aw-msg"></p>`;
     document.body.appendChild(box);
@@ -265,7 +265,29 @@ button{font:inherit;cursor:pointer;border-radius:8px;border:1px solid transparen
 .actas #newpbox{display:inline-flex;gap:6px;flex:1 1 220px}
 .actas #newpbox[hidden]{display:none}
 .actnote{background:var(--maybe-soft);color:var(--ink);border-radius:8px;padding:6px 10px;font-size:.85rem;font-weight:600}
-.wrap > .qui, .wrap > .ideas, .wrap > h2.sec, .wrap > .history, .wrap > .admin{margin-top:10px}
+.side > .ideas, .mainc > .history, .mainc > .admin{margin-top:10px}
+/* mise en page « site » : bandeau pleine largeur, deux colonnes sur grand écran */
+body{overflow-x:clip;padding-block-start:0}
+.wrap{max-width:1120px}
+header.site{margin-inline:calc(50% - 50vw);gap:0}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:10px 16px;flex-wrap:wrap;padding:10px max(16px, calc(50vw - 560px));background:var(--surface);border-bottom:1px solid var(--line)}
+.brand{font-family:var(--display);font-weight:800;font-size:1.05rem;display:flex;align-items:center;gap:9px;color:var(--head)}
+.logo{display:grid;grid-template-columns:repeat(2,8px);gap:2px;transform:rotate(45deg)}
+.logo i{width:8px;height:8px;border-radius:2px;display:block}
+.logo i:nth-child(1){background:#302782}.logo i:nth-child(2){background:#139593}.logo i:nth-child(3){background:#E1B427}.logo i:nth-child(4){background:#21C9E2}
+.topbar .evpick{flex:0 1 380px}
+.topbar .evpick select{min-height:34px;padding:5px 10px}
+header.site .hero{border-radius:0;padding:36px max(16px, calc(50vw - 560px)) 32px}
+.cols{display:flex;flex-direction:column;gap:14px}
+.side,.mainc{display:flex;flex-direction:column;gap:14px;min-width:0}
+@media (min-width:980px){
+  .cols{display:grid;grid-template-columns:minmax(300px,370px) minmax(0,1fr);gap:32px;align-items:start}
+  .side{position:sticky;top:16px}
+  .side > .ideas{margin-top:10px}
+  .mainc > .sec.c-quand{margin-top:0}
+}
+.wrap.is-closed .side{display:none}
+.wrap.is-closed .cols{display:flex}
 #namebar.need .namebar{outline:2px solid var(--pop)}
 .namebar .who-voted{font-size:.83rem;color:var(--muted)}
 
@@ -322,7 +344,7 @@ button.cd:disabled{cursor:default;opacity:.55}
 .cal .d{font-family:var(--display);font-weight:800;font-size:1.15rem}
 .mid{min-width:0;display:flex;flex-direction:column;gap:3px}
 .line1{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.counts{display:flex;gap:8px;font-size:.81rem;font-variant-numeric:tabular-nums;color:var(--muted)}
+.counts{display:flex;flex-wrap:wrap;gap:2px 10px;font-size:.81rem;font-variant-numeric:tabular-nums;color:var(--muted)}
 .counts .y b{color:var(--yes)}.counts .m b{color:var(--maybe)}.counts .n b{color:var(--no)}
 .bar{display:flex;height:5px;border-radius:999px;overflow:hidden;background:var(--line);max-width:220px}
 .bar span{display:block;height:100%}
@@ -418,6 +440,10 @@ button.cd:disabled{cursor:default;opacity:.55}
 .closedbar strong{color:var(--yes)}
 .closedbar{display:flex;flex-direction:column;gap:8px}
 .wrap.is-closed .poll{display:none}
+/* aucun sondage : on ne garde que « Qui ? » et la création du sondage, mise en avant */
+.wrap.is-empty .poll:not(.qui){display:none}
+.wrap.is-empty .admin{border:1px solid var(--line);border-style:solid;background:var(--surface);padding:16px}
+.wrap.is-empty .admin summary{font-size:1.05rem}
 .closedbar{background:var(--surface);border:1px solid var(--line);padding:0;overflow:hidden;gap:0}
 .recap{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
 .recap .col{display:flex;flex-direction:column;gap:2px;padding:14px 16px;border-left:1px solid var(--line);min-width:0}
@@ -463,10 +489,13 @@ button.cd:disabled{cursor:default;opacity:.55}
 </style>
 
 <div class="wrap">
-  <header>
-    <div class="evpick" id="evpick" hidden>
-      <label for="evselect">Sondage</label>
-      <select id="evselect"></select>
+  <header class="site">
+    <div class="topbar">
+      <span class="brand"><span class="logo" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Afterworks</span>
+      <div class="evpick" id="evpick" hidden>
+        <label for="evselect">Sondage</label>
+        <select id="evselect"></select>
+      </div>
     </div>
     <div class="hero">
       <span class="bub" style="left:8%;width:14px;height:14px;animation-duration:6s"></span>
@@ -476,16 +505,18 @@ button.cd:disabled{cursor:default;opacity:.55}
       <span class="bub" style="left:78%;width:22px;height:22px;animation-duration:8s;animation-delay:1.8s"></span>
       <span class="bub" style="left:90%;width:9px;height:9px;animation-duration:5.5s;animation-delay:.2s"></span>
       <h1><span id="evtitle">Afterwork</span> <span aria-hidden="true">🥂</span></h1>
-      <span class="tag">Qui ? Quoi ? Quand ?</span>
+      <span class="tag">Qui&nbsp;? Quoi&nbsp;? Quand&nbsp;?</span>
     </div>
-    <span class="status" id="status">Chargement des sondages…</span>
   </header>
+  <span class="status" id="status">Chargement des sondages…</span>
 
   <div class="backbar" id="backbar" hidden><a href="#" id="backlink">← Revenir au sondage en cours</a></div>
   <div class="closedbar" id="closedbar" hidden></div>
 
+  <div class="cols">
+  <aside class="side">
   <section class="qui poll" id="namebar" hidden>
-    <h2 class="sec c-qui">Qui ?</h2>
+    <h2 class="sec c-qui">Qui&nbsp;?</h2>
     <div class="namebar">
     <form id="nameform">
       <div class="nf"><label for="f-name">Prénom</label><input type="text" id="f-name" maxlength="40" autocomplete="given-name" required></div>
@@ -496,7 +527,7 @@ button.cd:disabled{cursor:default;opacity:.55}
     <p class="msg" id="name-msg"></p>
     <div class="who-voted" id="whovoted"></div>
     <div class="actas" id="actas" hidden>
-      <label for="actsel">Organisateur · voter pour</label>
+      <label for="actsel">Organisateur : répondre pour</label>
       <select id="actsel" class="csel"></select>
       <span id="newpbox" hidden><input type="text" id="newp" maxlength="40" aria-label="Nom du participant"><button class="btn" type="button" id="newpok">Ajouter</button></span>
     </div>
@@ -505,7 +536,7 @@ button.cd:disabled{cursor:default;opacity:.55}
   </section>
 
   <section class="ideas poll">
-    <h2 class="sec c-quoi">Quoi ?</h2>
+    <h2 class="sec c-quoi">Quoi&nbsp;?</h2>
     <div class="chips rows" id="idealist"></div>
     <form id="ideaform" hidden>
       <input type="text" id="f-idea" maxlength="80" placeholder="Votre idée" aria-label="Votre idée">
@@ -514,7 +545,9 @@ button.cd:disabled{cursor:default;opacity:.55}
     <p class="msg" id="idea-msg"></p>
   </section>
 
-  <h2 class="sec poll c-quand">Quand ?</h2>
+  </aside>
+  <div class="mainc">
+  <h2 class="sec poll c-quand">Quand&nbsp;?</h2>
   <div class="legend poll" aria-hidden="true">
     <span>🙌 Je viens</span>
     <span>🤔 Peut-être</span>
@@ -562,6 +595,8 @@ button.cd:disabled{cursor:default;opacity:.55}
     <div class="actions" id="evactions"></div>
     <p class="ok" id="admin-ok"></p>
   </section>
+  </div>
+  </div>
 </div>
 
 <script>
@@ -723,7 +758,7 @@ button.cd:disabled{cursor:default;opacity:.55}
         ${n ? `<div class="who">${esc(i.l.map(nameOf).join(", "))}</div>` : ""}
         <div class="iv">
           ${canAct() ? `<button class="ivote" data-act="like" data-iid="${i.id}" aria-pressed="${!!mine}">👍 ${n}</button>` : `<span class="ivote" aria-label="${n} vote${n>1?"s":""}">👍 ${n}</span>`}
-          ${canDel ? `<button class="x" data-act="delidea" data-iid="${i.id}" aria-label="Supprimer l'idée">×</button>` : ""}
+          ${canDel ? `<button class="x" data-act="delidea" data-iid="${i.id}" aria-label="Supprimer l'activité">×</button>` : ""}
         </div>
         ${mgr(ev) && !closed ? `<div class="acts"><button class="ghost" data-act="chooseidea" data-iid="${i.id}">${ev?.chosenIdea === i.id ? "Annuler le choix" : "Retenir cette activité"}</button></div>` : ""}
       </div>`;
@@ -761,10 +796,10 @@ button.cd:disabled{cursor:default;opacity:.55}
     bar.hidden = false;
     const n = tt.yes.length, L = arr => esc(arr.map(nameOf).join(", "));
     bar.innerHTML = `<div class="recap">
-        <div class="col"><span class="k">Quand ?</span><span class="v">${esc(whenTxt)}</span><span class="s">${esc(time.replace(":", "h"))}</span></div>
-        <div class="col"><span class="k">Quoi ?</span><span class="v">${act ? esc(act.text) : "À définir"}</span></div>
-        <div class="col"><span class="k">Qui ?</span><span class="v">${n} personne${n>1?"s":""}</span>
-          <ul class="ppl">${[...tt.yes.map(i => [i, "yes", "Vient"]), ...tt.maybe.map(i => [i, "maybe", "Peut-être"]), ...tt.no.map(i => [i, "no", "Pas dispo"])].map(([i, c, l]) => `<li class="${c}"><span class="nm">${esc(nameOf(i))}</span><span class="st">${l}</span></li>`).join("")}</ul>
+        <div class="col"><span class="k">Quand&nbsp;?</span><span class="v">${esc(whenTxt)}</span><span class="s">${esc(time.replace(":", "h"))}</span></div>
+        <div class="col"><span class="k">Quoi&nbsp;?</span><span class="v">${act ? esc(act.text) : "À définir"}</span></div>
+        <div class="col"><span class="k">Qui&nbsp;?</span><span class="v">${n} personne${n>1?"s":""}</span>
+          <ul class="ppl">${[...tt.yes.map(i => [i, "yes", "Dispo"]), ...tt.maybe.map(i => [i, "maybe", "Peut-être"]), ...tt.no.map(i => [i, "no", "Pas dispo"])].map(([i, c, l]) => `<li class="${c}"><span class="nm">${esc(nameOf(i))}</span><span class="st">${l}</span></li>`).join("")}</ul>
         </div>
       </div>
       ${upcoming ? `<div class="acts">
@@ -810,7 +845,7 @@ button.cd:disabled{cursor:default;opacity:.55}
       const n = ui.sel.size;
       html += `<div class="caltool">${n ? `<span class="cnt">${n} date${n>1?"s":""}</span>
         <button class="ivote" data-cact="yes">🙌 Je viens</button><button class="ivote" data-cact="maybe">🤔 Peut-être</button><button class="ivote" data-cact="no">🙅 Pas dispo</button><button class="ghost" data-cact="clear">Effacer</button><button class="ghost" data-cact="none">Désélectionner</button>`
-        : `<span class="hint">Touchez des dates pour les sélectionner</span><button class="ghost" data-cact="all">Tout sélectionner</button>`}</div>`;
+        : `<span class="hint">Sélectionnez des dates</span><button class="ghost" data-cact="all">Tout sélectionner</button>`}</div>`;
     }
     for (let m = new Date(first.getFullYear(), first.getMonth(), 1); m <= last; m = new Date(m.getFullYear(), m.getMonth() + 1, 1)) {
       const days = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate(), lead = (m.getDay() + 6) % 7;
@@ -859,6 +894,8 @@ button.cd:disabled{cursor:default;opacity:.55}
     const active = document.activeElement;
     const focusId = active && list.contains(active) ? active.id : null;
 
+    $(".wrap").classList.toggle("is-empty", !curEv());
+    if (!curEv() && !ui.autoOpened && S.me && S.canWrite) { ui.autoOpened = true; $("#newev").open = true; }
     if (!curEv()) {
       list.innerHTML = `<div class="empty">${S.me && S.canWrite ? "Aucun sondage pour l'instant. Créez-en un avec « Nouveau sondage » en bas de page." : "Aucun sondage en cours pour l'instant."}</div>`;
       return;
@@ -902,7 +939,7 @@ button.cd:disabled{cursor:default;opacity:.55}
           <div class="cal" data-wd="${dt.getDay()}" aria-hidden="true"><div class="w">${dt.toLocaleDateString("fr-FR",{weekday:"short"}).replace(".","")}</div><div class="d">${dt.getDate()}</div></div>
           <div class="mid">
             <div class="line1"><span style="position:absolute;left:-9999px">${esc(label)}</span>
-              <span class="counts"><span class="y"><b>${t.yes.length}</b> dispo</span><span class="m"><b>${t.maybe.length}</b> ?</span><span class="n"><b>${t.no.length}</b> non</span></span>
+              <span class="counts"><span class="y"><b>${t.yes.length}</b> dispo</span><span class="m"><b>${t.maybe.length}</b> peut-être</span><span class="n"><b>${t.no.length}</b> pas dispo</span></span>
               ${chosen ? "" : lead ? `<span class="badge lead">🔥 En tête</span>` : past ? `<span class="badge past">Passée</span>` : ""}
             </div>
             <div class="bar" aria-hidden="true"><span class="y" style="width:${pct(t.yes.length)}%"></span><span class="m" style="width:${pct(t.maybe.length)}%"></span><span class="n" style="width:${pct(t.no.length)}%"></span></div>
@@ -1004,7 +1041,7 @@ button.cd:disabled{cursor:default;opacity:.55}
     if (!text || !canAct()) return;
     if (curIdeas().some(i => i.text.toLowerCase() === text.toLowerCase())) { msg.textContent = "Cette activité est déjà proposée : votez pour elle !"; return; }
     try { await db.collection("ideas").add({ eventId: S.cur, text, by: S.me, at: Date.now() }); $("#f-idea").value = ""; }
-    catch { msg.textContent = "L'idée n'a pas pu être ajoutée. Réessayez."; }
+    catch { msg.textContent = "L'activité n'a pas pu être ajoutée. Réessayez."; }
   });
   $("#idealist").addEventListener("click", async e => {
     const b = e.target.closest("button[data-act]"); if (!b || !canAct()) return;
@@ -1022,7 +1059,7 @@ button.cd:disabled{cursor:default;opacity:.55}
         if (curEv()?.chosenIdea === iid && mgr(curEv())) await db.doc("events/" + S.cur).update({ chosenIdea: null });
       } catch { $("#idea-msg").textContent = "La suppression a échoué."; }
     } else if (b.dataset.act === "chooseidea") {
-      try { await db.doc("events/" + S.cur).update({ chosenIdea: curEv()?.chosenIdea === iid ? null : iid }); } catch { $("#idea-msg").textContent = "Seul l'organisateur peut retenir une activité."; }
+      try { await db.doc("events/" + S.cur).update({ chosenIdea: curEv()?.chosenIdea === iid ? null : iid }); } catch { $("#idea-msg").textContent = "Seul le créateur du sondage ou l'organisateur peut retenir une activité."; }
     }
   });
 
@@ -1066,7 +1103,7 @@ button.cd:disabled{cursor:default;opacity:.55}
       } catch { setStatus("La suppression a échoué.", true); }
     }
     else if (act === "delc") { try { await db.doc("comments/" + b.dataset.cid).delete(); } catch { setStatus("La suppression a échoué.", true); } }
-    else if (act === "choose") { try { await db.doc("events/" + S.cur).update({ chosen: curEv()?.chosen === id ? null : id }); } catch { setStatus("Seul l'organisateur peut retenir une date.", true); } }
+    else if (act === "choose") { try { await db.doc("events/" + S.cur).update({ chosen: curEv()?.chosen === id ? null : id }); } catch { setStatus("Seul le créateur du sondage ou l'organisateur peut retenir une date.", true); } }
   });
 
   // --- organisateur : nouveau sondage, clôture ---
@@ -1092,7 +1129,7 @@ button.cd:disabled{cursor:default;opacity:.55}
     if (end < start) { msg.textContent = "La date de fin doit être après la date de début."; return; }
     const days = [];
     for (let d = parseD(start); iso(d) <= end; d.setDate(d.getDate()+1)) { const w = d.getDay(); if (!week || (w > 0 && w < 6)) days.push(iso(d)); }
-    if (days.length > 45) { msg.textContent = `Ça fait ${days.length} dates : réduisez la période (45 au maximum).`; return; }
+    if (days.length > 45) { msg.textContent = `Cette période compte ${days.length} dates : réduisez-la (45 au maximum).`; return; }
     $("#e-submit").disabled = true;
     try {
       const id = `ev-${start.slice(0,7)}-${Math.random().toString(36).slice(2,6)}`;
@@ -1101,7 +1138,7 @@ button.cd:disabled{cursor:default;opacity:.55}
       $("#newev").open = false; prefillNew();
       $("#admin-ok").textContent = `« ${title} » est créé avec ${days.length} date${days.length>1?"s":""}.`;
       location.hash = id;
-    } catch (err) { msg.textContent = err?.code === "invalid_argument" ? "Seul l'organisateur peut créer un sondage." : "Le sondage n'a pas pu être créé. Réessayez."; }
+    } catch (err) { msg.textContent = err?.code === "invalid_argument" ? "Vous n'avez pas le droit de créer un sondage." : "Le sondage n'a pas pu être créé. Réessayez."; }
     finally { $("#e-submit").disabled = false; }
   });
   $("#evactions").addEventListener("change", e => {
