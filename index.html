@@ -620,6 +620,9 @@ button.cd .c + .n{margin-top:0}
 .ddo{background:none;border:none;border-radius:.5rem;padding:.4rem .7rem;text-align:left;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
 .ddo:hover{background:var(--accent-soft)}
 .ddo.on{background:var(--accent);color:var(--accent-ink)}
+
+.sortsw{display:flex;align-items:center;gap:.5rem;font-size:.82rem;color:var(--muted);font-weight:600}
+.sortsw[hidden]{display:none}
 </style>
 
 <div class="wrap">
@@ -694,6 +697,7 @@ button.cd .c + .n{margin-top:0}
     <button type="button" data-view="list" aria-pressed="true">Liste</button>
     <button type="button" data-view="cal" aria-pressed="false">Calendrier</button>
   </div>
+  <div class="sortsw poll" id="sortsw">Trier par <span class="seg" data-target="__sort"><button type="button" data-v="date" aria-pressed="true">Date</button><button type="button" data-v="votes" aria-pressed="false">Votes</button></span></div>
   <section class="calv poll" id="calv" hidden></section>
   <section class="list poll" id="list" aria-live="polite"><div class="empty">Chargement…</div></section>
 
@@ -756,7 +760,8 @@ button.cd .c + .n{margin-top:0}
   const LEGACY = "ev-2026-12";
   const S = { mails: {}, events: [], dates: [], votes: {}, comments: [], ideas: [], me: null, owner: false, admin: false, canWrite: true, loaded: false, cur: null };
   const ui = { open: new Set(), drafts: {}, confirmDel: null, editingName: false, confirmClose: false, sel: new Set(), view: "list" };
-  try { if (localStorage.getItem("aw-view") === "cal") ui.view = "cal"; } catch {}
+  ui.sort = "date"; // tri par date par défaut
+  try { if (localStorage.getItem("aw-view") === "cal") ui.view = "cal"; if (localStorage.getItem("aw-sort") === "votes") ui.sort = "votes"; } catch {}
   let db = null, user = null, profiles = {};
 
   const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
@@ -1050,7 +1055,8 @@ button.cd .c + .n{margin-top:0}
   function renderCal(){
     const box = $("#calv"), isCal = ui.view === "cal";
     document.querySelectorAll("#viewsw button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.view === ui.view)));
-    box.hidden = !isCal; $("#list").hidden = isCal;
+    box.hidden = !isCal; $("#list").hidden = isCal; $("#sortsw").hidden = isCal;
+    $("#sortsw").querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.v === (ui.sort === "date" ? "date" : "votes"))));
     if (!isCal) return;
     const ev = curEv(); if (!ev) { box.innerHTML = ""; return; }
     const ds = curDates(), today = todayISO();
@@ -1220,7 +1226,9 @@ button.cd .c + .n{margin-top:0}
     const score = d => { const t = tallies[d.id]; return t.yes.length*2 + t.maybe.length - t.no.length*0.01; };
     const isPast = d => !closed && d.date < today;
     // ordre de popularité : la date la plus demandée en haut, les dates passées en bas
-    dates.sort((a,b) => (isPast(a) - isPast(b)) || (ev.chosen === b.id) - (ev.chosen === a.id) || score(b) - score(a) || a.date.localeCompare(b.date));
+    dates.sort(ui.sort === "date"
+      ? (a,b) => a.date.localeCompare(b.date) || ORDER.indexOf(slotOf(a)) - ORDER.indexOf(slotOf(b))
+      : (a,b) => (isPast(a) - isPast(b)) || (ev.chosen === b.id) - (ev.chosen === a.id) || score(b) - score(a) || a.date.localeCompare(b.date));
     let leadId = null, best = 0;
     for (const d of dates) { if (!closed && d.date < today) continue; const t = tallies[d.id]; const sc = t.yes.length*2 + t.maybe.length; if (t.yes.length && sc > best) { best = sc; leadId = d.id; } }
 
@@ -1468,7 +1476,8 @@ button.cd .c + .n{margin-top:0}
     const b = e.target.closest(".seg[data-target] button[data-v]"); if (!b) return;
     const seg = b.closest(".seg"), t = seg.dataset.target;
     seg.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
-    if (t === "__addslot") ui.addSlot = b.dataset.v; else { const inp = document.getElementById(t); if (inp) inp.value = b.dataset.v; }
+    if (t === "__sort") { ui.sort = b.dataset.v; try { localStorage.setItem("aw-sort", ui.sort); } catch {} render(); }
+    else if (t === "__addslot") ui.addSlot = b.dataset.v; else { const inp = document.getElementById(t); if (inp) inp.value = b.dataset.v; }
   });
 
   function prefillNew(){
