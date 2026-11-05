@@ -1,0 +1,1176 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Afterworks Selfee</title>
+<style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
+<script>
+/* Afterworks Selfee — version GitHub Pages.
+   Les votes sont stockés dans un « blob » JSON public sur jsonblob.com (gratuit, sans compte).
+   Ce petit module imite l'API utilisée par la page (db + user), pour que le reste du code reste identique. */
+(() => {
+  // Deux services gratuits sans compte : jsonblob.com (prioritaire) et textdb.dev (secours).
+  const BE = {
+    jb: {
+      get: id => fetch("https://jsonblob.com/api/jsonBlob/" + id, { headers: { Accept: "application/json" }, cache: "no-store" }),
+      put: (id, body) => fetch("https://jsonblob.com/api/jsonBlob/" + id, { method: "PUT", headers: { "Content-Type": "application/json", Accept: "application/json" }, body }),
+      create: async body => {
+        const r = await fetch("https://jsonblob.com/api/jsonBlob", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const loc = r.headers.get("Location") || r.headers.get("X-jsonblob-id") || "";
+        const id = loc.split("/").pop();
+        if (!id) throw new Error("identifiant illisible");
+        return id;
+      },
+    },
+    td: {
+      get: id => fetch("https://textdb.dev/api/data/" + id, { cache: "no-store" }),
+      put: (id, body) => fetch("https://textdb.dev/api/data/" + id, { method: "POST", headers: { "Content-Type": "text/plain" }, body }),
+      create: async body => {
+        const id = crypto.randomUUID();
+        const w = await fetch("https://textdb.dev/api/data/" + id, { method: "POST", headers: { "Content-Type": "text/plain" }, body });
+        if (!w.ok) throw new Error("HTTP " + w.status);
+        const r = await fetch("https://textdb.dev/api/data/" + id, { cache: "no-store" });
+        if (!r.ok || !(await r.text()).includes("adminHash")) throw new Error("relecture impossible");
+        return id;
+      },
+    },
+  };
+  const qs = new URLSearchParams(location.search);
+  const BLOB = qs.get("s");
+  const KIND = BLOB && BLOB.startsWith("td.") ? "td" : "jb";
+  const BID = BLOB ? BLOB.replace(/^(td|jb)\./, "") : null;
+  const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
+  const rid = () => (crypto.randomUUID ? crypto.randomUUID().replace(/-/g, "") : Math.random().toString(36).slice(2) + Date.now().toString(36)).slice(0, 20);
+  const sha = async s => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)))].map(b => b.toString(16).padStart(2, "0")).join("");
+
+  // identité = ce navigateur
+  let uid = store("aw-uid"); if (!uid) { uid = "u" + rid(); store("aw-uid", uid); }
+
+  // lien organisateur : ?s=ID&k=CLE -> on garde la clé dans ce navigateur et on la retire de l'adresse
+  if (BLOB && qs.get("k")) { store("aw-key-" + BLOB, qs.get("k")); qs.delete("k"); history.replaceState(null, "", location.pathname + "?" + qs.toString() + location.hash); }
+  const KEY = BLOB ? store("aw-key-" + BLOB) : null;
+
+  const EMPTY = () => ({ v: 1, adminHash: "", events: {}, dates: {}, votes: {}, comments: {}, ideas: {}, emails: {} });
+  let data = null, raw = "", isAdmin = false;
+  const listeners = {}; // collection -> Set(fn)
+
+  const snapOf = c => {
+    const docs = Object.entries((data && data[c]) || {}).map(([id, d]) => ({ id, exists: true, data: () => d }));
+    return { docs, size: docs.length, empty: !docs.length, docChanges: () => [], metadata: { fromCache: false, hasPendingWrites: false } };
+  };
+  const notify = () => { for (const c in listeners) for (const fn of listeners[c]) { try { fn(snapOf(c)); } catch (e) { console.error(e); } } };
+
+  async function pull(){
+    const r = await BE[KIND].get(BID);
+    if (!r.ok) throw new Error("load " + r.status);
+    const t = await r.text();
+    if (t !== raw) { raw = t; data = Object.assign(EMPTY(), JSON.parse(t)); return true; }
+    return false;
+  }
+  let chain = Promise.resolve();
+  function write(mutate){
+    // relit la dernière version, applique la modification, renvoie le tout (limite les écrasements)
+    const job = chain.catch(() => {}).then(async () => {
+      await pull();
+      mutate(data);
+      const body = JSON.stringify(data);
+      const r = await BE[KIND].put(BID, body);
+      if (!r.ok) throw { code: "unavailable", message: "save " + r.status };
+      raw = body; notify();
+    });
+    chain = job;
+    return job;
+  }
+  const split = p => { const i = p.lastIndexOf("/"); return [p.slice(0, i), p.slice(i + 1)]; };
+  const docRef = path => {
+    const [c, id] = split(path);
+    // organisateur seul : créer / clôturer / rouvrir un sondage, modifier les réponses des autres
+    // Sondages : n'importe qui en crée un ; son créateur peut le gérer et le clôturer ; rouvrir / supprimer = organisateur.
+    const needAdmin = (c === "votes" || c === "emails") && id !== uid;
+    const no = () => { throw { code: "invalid_argument", message: "organisateur uniquement" }; };
+    const guard = () => { if (needAdmin && !isAdmin) no(); };
+    const evGuard = (s, d, op) => {
+      if (c !== "events" || isAdmin) return;
+      const cur = s.events?.[id];
+      if (op === "delete") no();
+      if (!cur) { if (op !== "set" || d.createdBy !== uid) no(); return; }
+      if (cur.createdBy !== uid) no();
+      if (cur.closed && d.closed === false) no();
+      if ("createdBy" in d && d.createdBy !== uid) no();
+    };
+    return {
+      id, path,
+      set: async d => { guard(); await write(s => { evGuard(s, d, "set"); (s[c] ||= {})[id] = JSON.parse(JSON.stringify(d)); }); },
+      update: async d => { guard(); await write(s => { evGuard(s, d, "update"); const cur = (s[c] ||= {})[id]; if (!cur) throw { code: "invalid_argument", message: "absent" }; Object.assign(cur, JSON.parse(JSON.stringify(d))); }); },
+      delete: async () => { guard(); await write(s => { evGuard(s, {}, "delete"); if (s[c]) delete s[c][id]; }); },
+      get: async () => { const d = data?.[c]?.[id]; return { id, exists: !!d, data: () => d, metadata: { fromCache: false } }; },
+      onSnapshot: () => () => {},
+    };
+  };
+  const db = {
+    collection: c => ({
+      path: c,
+      doc: id => docRef(c + "/" + (id || rid())),
+      add: async d => { const ref = docRef(c + "/" + rid()); await ref.set(d); return ref; },
+      onSnapshot: (fn, err) => {
+        (listeners[c] ||= new Set()).add(fn);
+        ready.then(() => fn(snapOf(c)), e => err && err({ code: "unavailable", message: String(e) }));
+        return () => listeners[c].delete(fn);
+      },
+    }),
+    doc: docRef,
+  };
+  const user = {
+    id: async () => uid,
+    isOwner: async () => isAdmin, canEdit: async () => isAdmin, can: async () => true,
+    me: async () => ({ id: uid, name: "", email: null, avatarUrl: "", color: "#197396", isOwner: isAdmin, canEdit: isAdmin }),
+    profiles: async ids => Object.fromEntries([].concat(ids).map(i => [i, { id: i, name: "", email: null, avatarUrl: "", color: "#197396", isMe: i === uid, guest: false }])),
+    name: async () => "", email: async () => null,
+  };
+
+  const ready = BLOB ? pull().then(async () => { isAdmin = !!KEY && !!data.adminHash && (await sha(KEY)) === data.adminHash; }) : Promise.reject(new Error("no blob"));
+  ready.catch(() => {});
+  // rafraîchit toutes les 8 s pour voir les votes des autres
+  if (BLOB) setInterval(() => { if (document.visibilityState === "visible") pull().then(ch => ch && notify()).catch(() => {}); }, 8000);
+
+  window.claude = { use: async n => {
+    if (!BLOB) return null;
+    try { await ready; } catch { return null; }
+    return n === "db" ? db : n === "user" ? user : null;
+  } };
+
+  // --- premier lancement : créer l'espace de vote ---
+  window.awSetup = { BLOB, KEY, uid, isAdminP: ready.then(() => isAdmin, () => false), shareUrl: () => location.origin + location.pathname + "?s=" + BLOB };
+  async function create(btn, msg){
+    btn.disabled = true; msg.textContent = "Création…";
+    try {
+      const key = rid() + rid();
+      const body = Object.assign(EMPTY(), { adminHash: await sha(key) });
+      const json = JSON.stringify(body);
+      let id = null, errs = [];
+      for (const k of ["jb", "td"]) {
+        try { id = k + "." + await BE[k].create(json); break; } catch (e) { errs.push(k + " : " + e.message); }
+      }
+      if (!id) throw new Error(errs.join(" ; "));
+      store("aw-key-" + id, key);
+      location.href = location.pathname + "?s=" + id + "&k=" + key;
+    } catch (e) {
+      msg.textContent = "Les services de stockage n'ont pas répondu (" + e.message + "). Réessayez dans un instant.";
+      btn.disabled = false;
+    }
+  }
+  if (BLOB) document.addEventListener("DOMContentLoaded", () => {
+    ready.then(() => {
+      if (!isAdmin) return;
+      const box = document.createElement("div");
+      box.className = "sharebox";
+      const url = location.origin + location.pathname + "?s=" + BLOB;
+      box.innerHTML = `<strong>Lien à partager</strong><input type="text" readonly id="aw-share" aria-label="Lien à partager"><button class="btn" type="button" id="aw-copy">Copier</button><span class="ok" id="aw-copied"></span>
+        <p class="hint">Ce navigateur est reconnu comme organisateur. Pour l'être sur un autre ordinateur, gardez ce lien privé : <a href="#" id="aw-orglink">copier mon lien organisateur</a>.</p>`;
+      document.getElementById("admin").prepend(box);
+      box.querySelector("#aw-share").value = url;
+      const copy = async (t, el) => { try { await navigator.clipboard.writeText(t); el.textContent = "Copié !"; } catch { const i = box.querySelector("#aw-share"); i.value = t; i.select(); el.textContent = "Sélectionné : copiez-le (Ctrl+C)."; } };
+      box.querySelector("#aw-copy").addEventListener("click", () => copy(url, box.querySelector("#aw-copied")));
+      box.querySelector("#aw-orglink").addEventListener("click", e => { e.preventDefault(); copy(url + "&k=" + KEY, box.querySelector("#aw-copied")); });
+    }, () => {});
+  });
+  if (!BLOB) document.addEventListener("DOMContentLoaded", () => {
+    document.querySelector(".wrap").hidden = true;
+    const box = document.createElement("div");
+    box.className = "setup";
+    box.innerHTML = `<div class="hero"><h1>Afterworks Selfee <span aria-hidden="true">🥂</span></h1><span class="tag">Qui ? Quoi ? Quand ?</span></div>
+      <p>Première ouverture : créez l'espace de vote. Vous recevrez un lien à partager et deviendrez l'organisateur sur ce navigateur.</p>
+      <button class="btn" id="aw-create">Créer l'espace de vote</button><p class="msg" id="aw-msg"></p>`;
+    document.body.appendChild(box);
+    document.getElementById("aw-create").addEventListener("click", e => create(e.currentTarget, document.getElementById("aw-msg")));
+  });
+})();
+
+</script>
+</head>
+<body>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;700;800&family=Open+Sans:wght@400;600&display=swap">
+<style>
+/* Layout: une colonne compacte — en-tête, onglets des sondages (historique), Qui / Quoi / Quand, puis espace organisateur. */
+:root{
+  /* Charte Selfee : indigo #302782, bleu #197396, teal #139593, rouge #E52323, jaune #E1B427, sable #C99E67, titres #2A4D8D */
+  --bg:#F5F6F8; --surface:#FFFFFF; --ink:#1D2340; --head:#2A4D8D; --muted:#5B6584; --line:#DFE3EC;
+  --accent:#197396; --accent-ink:#FFFFFF; --accent-soft:#E2EFF4; --pop:#139593; --on-pop:#FFFFFF; --sun:#E1B427; --sand:#C99E67;
+  --yes:#11807E; --yes-soft:#DCF0EF; --maybe:#A77F0E; --maybe-soft:#FBF1D3; --no:#6B7590; --no-soft:#E8EBF1;
+  --display:"Montserrat", Helvetica, Arial, sans-serif;
+  --body:"Open Sans", Helvetica, Arial, sans-serif;
+  --r:12px;
+  --hero-a:#2A4D8D; --hero-b:#197396; --hero-c:#139593; --on-hero:#FFFFFF;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#10161B; --surface:#182128; --ink:#E7EDF1; --head:#8FC3DA; --muted:#9AA9B4; --line:#283540;
+  --accent:#3E9EC4; --accent-ink:#0B1418; --accent-soft:#16303B; --pop:#2FB8B5; --on-pop:#0B1F1F; --sun:#E9C24D; --sand:#D5B07F;
+  --yes:#3FC3C0; --yes-soft:#0F3433; --maybe:#E9C24D; --maybe-soft:#3A3114; --no:#A3ACBF; --no-soft:#262D38;
+  color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#10161B; --surface:#182128; --ink:#E7EDF1; --head:#8FC3DA; --muted:#9AA9B4; --line:#283540;
+  --accent:#3E9EC4; --accent-ink:#0B1418; --accent-soft:#16303B; --pop:#2FB8B5; --on-pop:#0B1F1F; --sun:#E9C24D; --sand:#D5B07F;
+  --yes:#3FC3C0; --yes-soft:#0F3433; --maybe:#E9C24D; --maybe-soft:#3A3114; --no:#A3ACBF; --no-soft:#262D38;
+  color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--body);font-size:15px;line-height:1.5;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:20px 40px}
+.wrap{max-width:760px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+h1,h2{font-family:var(--display);text-wrap:balance;margin:0}
+h1{font-size:clamp(1.7rem,6vw,2.5rem);font-weight:800;letter-spacing:-.02em;line-height:1.05}
+h1 .q{color:var(--pop)}
+.hero{position:relative;overflow:hidden;border-radius:20px;background:linear-gradient(130deg,var(--hero-a) 0%,var(--hero-b) 60%,var(--hero-c) 100%);color:var(--on-hero);padding:22px 20px 20px;display:flex;flex-direction:column;gap:6px}
+.hero > *{position:relative;z-index:1}
+.eyebrow{font-size:.74rem;letter-spacing:.14em;text-transform:uppercase;font-weight:700;opacity:.8}
+.lede{max-width:52ch;margin:0;opacity:.9}
+.tag{align-self:flex-start;background:#21C9E2;color:#302782;font-family:var(--display);font-weight:800;font-size:.81rem;padding:4px 10px;border-radius:999px;transform:rotate(-3deg);margin-top:4px}
+.bub{position:absolute;bottom:-30px;border-radius:50%;border:2px solid rgba(225,180,39,.6);background:rgba(225,180,39,.14);z-index:0;pointer-events:none}
+@media (prefers-reduced-motion:no-preference){
+  .bub{animation:rise linear infinite}
+  @keyframes rise{0%{transform:translateY(0) scale(.7);opacity:0}15%{opacity:1}100%{transform:translateY(-240px) scale(1.1);opacity:0}}
+  .vote[aria-pressed=true]{animation:pop .28s ease-out}
+  @keyframes pop{0%{transform:scale(.8)}60%{transform:scale(1.15)}100%{transform:scale(1)}}
+  .cal{transition:transform .2s}
+  .item:hover .cal{transform:rotate(-6deg) scale(1.05)}
+}
+header{display:flex;flex-direction:column;gap:14px}
+.status{font-size:.83rem;color:var(--muted)}
+.status:empty{display:none}
+.status.warn{color:var(--no)}
+
+input[type=date],input[type=text],input[type=email]{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:6px 10px;min-height:36px;width:100%}
+input:focus-visible,button:focus-visible{outline:2px solid var(--pop);outline-offset:2px}
+button{font:inherit;cursor:pointer;border-radius:8px;border:1px solid transparent}
+.btn{background:var(--accent);color:var(--accent-ink);font-weight:600;padding:6px 14px;min-height:36px;white-space:nowrap}
+.btn:hover{filter:brightness(1.08)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.link{background:none;border:none;color:var(--accent);font-weight:600;padding:0 2px;text-decoration:underline;text-underline-offset:2px}
+.ghost{background:transparent;color:var(--muted);border-color:var(--line);padding:3px 9px;font-size:.81rem}
+.ghost:hover{color:var(--ink);border-color:var(--muted)}
+.msg{font-size:.83rem;color:var(--no);margin:0}
+.msg:empty{display:none}
+
+.namebar{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;display:flex;flex-direction:column;gap:6px}
+.namebar form{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end}
+.namebar .nf{display:flex;flex-direction:column;gap:3px;flex:1 1 170px;min-width:0}
+.namebar .nf label{font-size:.78rem;color:var(--muted)}
+.namebar label{font-weight:600}
+.namebar input{width:100%;background:var(--surface)}
+.qui{display:flex;flex-direction:column;gap:8px}
+.actas{display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-top:1px dashed var(--line);padding-top:8px;font-size:.85rem}
+.actas label{font-weight:600;color:var(--muted)}
+.actas #newpbox{display:inline-flex;gap:6px;flex:1 1 220px}
+.actas #newpbox[hidden]{display:none}
+.actnote{background:var(--maybe-soft);color:var(--ink);border-radius:8px;padding:6px 10px;font-size:.85rem;font-weight:600}
+.wrap > .qui, .wrap > .ideas, .wrap > h2.sec, .wrap > .history, .wrap > .admin{margin-top:10px}
+#namebar.need .namebar{outline:2px solid var(--pop)}
+.namebar .who-voted{font-size:.83rem;color:var(--muted)}
+
+.list{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.item{border-top:1px solid var(--line)}
+.item:first-child{border-top:none}
+.item.lead{background:linear-gradient(90deg,var(--accent-soft),transparent 70%)}
+.item.chosen{background:var(--yes-soft)}
+.item.past{opacity:.55}
+.r{display:grid;grid-template-columns:52px minmax(0,1fr) auto;gap:4px 12px;align-items:center;padding:8px 12px}
+.cal{text-align:center;line-height:1.05;border-radius:10px;background:var(--accent);color:var(--accent-ink);padding:4px 0 3px}
+.viewsw{display:inline-flex;align-self:flex-start;border:1px solid var(--line);border-radius:999px;overflow:hidden;background:var(--surface)}
+.viewsw button{background:none;border:none;border-radius:0;padding:5px 14px;font-weight:600;font-size:.85rem;color:var(--muted)}
+.viewsw button[aria-pressed=true]{background:var(--accent);color:var(--accent-ink)}
+.calv{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:12px;display:flex;flex-direction:column;gap:14px}
+.caltool{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:.85rem;position:sticky;top:env(safe-area-inset-top,0px);background:var(--surface);z-index:2;padding:2px 0 6px;border-bottom:1px solid var(--line)}
+.caltool .cnt{font-weight:700;margin-right:4px}
+.caltool .hint{color:var(--muted);margin-right:4px}
+.mon h3{font-family:var(--display);font-size:.95rem;margin:0 0 6px;text-transform:capitalize;color:var(--head)}
+.grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px;max-width:460px}
+.grid .dh{font-size:.74rem;font-weight:700;color:var(--muted);text-align:center}
+.cd{position:relative;aspect-ratio:1/1;max-width:100%;border-radius:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:.88rem;padding:0;font-variant-numeric:tabular-nums}
+.cd.off{color:var(--muted);opacity:.35}
+button.cd{border:2px solid var(--line);background:var(--bg);color:var(--ink);font-weight:700}
+button.cd .n{line-height:1}
+button.cd .m{font-size:.88rem;line-height:1;min-height:.9rem;margin-top:2px}
+button.cd .c{position:absolute;top:2px;right:5px;font-size:.74rem;color:var(--yes);font-weight:800}
+button.cd::after{content:"";position:absolute;left:30%;right:30%;bottom:3px;height:3px;border-radius:2px;background:var(--wdc,transparent)}
+button.cd[data-a=yes]{background:var(--yes-soft)}
+button.cd[data-a=maybe]{background:var(--maybe-soft)}
+button.cd[data-a=no]{background:var(--no-soft)}
+button.cd[aria-pressed=true]{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft);transform:scale(.96)}
+button.cd:disabled{cursor:default;opacity:.55}
+.cd[data-wd="1"]{--wdc:#139593}.cd[data-wd="2"]{--wdc:#197396}.cd[data-wd="3"]{--wdc:#E1B427}.cd[data-wd="4"]{--wdc:#C99E67}.cd[data-wd="5"]{--wdc:#21C9E2}
+/* une couleur Selfee par jour de la semaine */
+.cal[data-wd="1"]{background:#139593;color:#fff}
+.cal[data-wd="2"]{background:#197396;color:#fff}
+.cal[data-wd="3"]{background:#E1B427;color:#302782}
+.cal[data-wd="4"]{background:#C99E67;color:#302782}
+.cal[data-wd="5"]{background:#21C9E2;color:#302782}
+.cal[data-wd="0"],.cal[data-wd="6"]{background:#302782;color:#fff}
+.sec.c-qui::before,.sec.c-quoi::before,.sec.c-quand::before{content:"";display:inline-block;width:11px;height:11px;border-radius:3px;transform:rotate(45deg);align-self:center;margin-right:2px}
+.sec.c-qui::before{background:#139593}
+.sec.c-quoi::before{background:#E1B427}
+.sec.c-quand::before{background:#21C9E2}
+.recap .col{border-top:4px solid transparent}
+.recap .col:nth-child(1){border-top-color:#21C9E2}
+.recap .col:nth-child(2){border-top-color:#E1B427}
+.recap .col:nth-child(3){border-top-color:#139593}
+.bub:nth-child(3n){border-color:rgba(33,201,226,.75);background:rgba(33,201,226,.15)}
+.bub:nth-child(3n+1){border-color:rgba(255,255,255,.55);background:rgba(255,255,255,.1)}
+.bub:nth-child(3n+2){border-color:rgba(225,180,39,.7);background:rgba(225,180,39,.15)}
+.cal .w{font-size:.74rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;opacity:.8}
+.cal .d{font-family:var(--display);font-weight:800;font-size:1.15rem}
+.mid{min-width:0;display:flex;flex-direction:column;gap:3px}
+.line1{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.counts{display:flex;gap:8px;font-size:.81rem;font-variant-numeric:tabular-nums;color:var(--muted)}
+.counts .y b{color:var(--yes)}.counts .m b{color:var(--maybe)}.counts .n b{color:var(--no)}
+.bar{display:flex;height:5px;border-radius:999px;overflow:hidden;background:var(--line);max-width:220px}
+.bar span{display:block;height:100%}
+.bar .y{background:var(--yes)}.bar .m{background:var(--maybe)}.bar .n{background:var(--no)}
+.names{font-size:.81rem;color:var(--muted);overflow-wrap:anywhere}
+.names .y{color:var(--yes);font-weight:600}.names .m{color:var(--maybe);font-weight:600}
+.note{font-size:.83rem;color:var(--muted);font-style:italic;overflow-wrap:anywhere}
+.badge{font-size:.74rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;padding:2px 7px;border-radius:999px}
+.badge.lead{background:#E1B427;color:#302782}
+.badge.chosen{background:var(--yes);color:var(--surface)}
+.badge.past{background:var(--line);color:var(--muted)}
+.right{display:flex;align-items:center;gap:6px}
+.votes{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.vote{border:none;border-radius:0;background:var(--surface);color:var(--muted);font-size:1.05rem;width:40px;height:34px;padding:0;border-left:1px solid var(--line);filter:grayscale(1);opacity:.6}
+.vote:hover,.vote[aria-pressed=true]{filter:none;opacity:1}
+.vote:active{transform:scale(.9)}
+.vote:first-child{border-left:none}
+.vote:hover{color:var(--ink);background:var(--bg)}
+.vote[data-v=yes][aria-pressed=true]{background:var(--yes);color:var(--surface)}
+.vote[data-v=maybe][aria-pressed=true]{background:var(--maybe);color:var(--surface)}
+.vote[data-v=no][aria-pressed=true]{background:var(--no);color:var(--surface)}
+.more{background:none;border:none;color:var(--muted);font-size:.81rem;padding:4px;min-width:32px;height:32px;font-variant-numeric:tabular-nums}
+.more:hover{color:var(--ink)}
+.more[aria-expanded=true]{color:var(--accent)}
+.detail{padding:0 12px 10px 76px;display:flex;flex-direction:column;gap:6px}
+.cmt{display:flex;gap:6px;align-items:baseline;font-size:.85rem}
+.cmt .nm{font-weight:600;flex:none}
+.cmt .tx{overflow-wrap:anywhere;min-width:0;flex:1}
+.cmt .x{background:none;border:none;color:var(--muted);font-size:.74rem;padding:0 4px}
+.cform{display:flex;gap:6px}
+.cform input{flex:1;min-width:0;min-height:32px;padding:4px 9px}
+.cform .btn{min-height:32px;padding:4px 10px;font-size:.85rem}
+.actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:.83rem}
+.legend{font-size:.78rem;color:var(--muted);display:flex;gap:12px;flex-wrap:wrap}
+.legend b{display:inline-block;width:20px;text-align:center;border-radius:4px;color:var(--surface);margin-right:4px}
+.empty{padding:20px;text-align:center;color:var(--muted)}
+
+.propose{display:flex;flex-direction:column;gap:6px}
+.propose summary{cursor:pointer;font-weight:600;color:var(--accent);font-size:.88rem}
+.propose .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding-top:6px}
+.propose .row input[type=date]{width:auto}
+.propose .row input[type=text]{flex:1 1 200px;width:auto}
+.sec{font-family:var(--display);font-size:1.05rem;font-weight:800;color:var(--head);display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.sec span{font-family:var(--body);font-size:.81rem;font-weight:400;color:var(--muted)}
+.ideas{display:flex;flex-direction:column;gap:8px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chips .none{font-size:.83rem;color:var(--muted)}
+.idea{display:inline-flex;align-items:center;gap:4px;max-width:100%;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:3px 4px 3px 12px;font-size:.88rem}
+.idea .t{overflow-wrap:anywhere;min-width:0}
+.idea .like{background:var(--bg);border:none;border-radius:999px;padding:2px 9px;font-size:.83rem;color:var(--muted);font-variant-numeric:tabular-nums;flex:none}
+.idea .like[aria-pressed=true]{background:var(--pop);color:var(--hero-a);font-weight:700}
+.idea .x{background:none;border:none;color:var(--muted);padding:0 6px;font-size:.90rem;flex:none}
+.chips.rows{display:block;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.chips.rows:empty{display:none}
+.irow{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 10px;align-items:center;padding:8px 12px;border-top:1px solid var(--line)}
+.irow:first-child{border-top:none}
+.irow.lead{background:linear-gradient(90deg,var(--accent-soft),transparent 70%)}
+.irow.chosen{background:var(--yes-soft)}
+.irow .t{font-weight:600;overflow-wrap:anywhere}
+.irow .top{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0}
+.irow .who{font-size:.81rem;color:var(--muted);overflow-wrap:anywhere}
+.irow .iv{grid-row:1 / span 2;grid-column:2;display:flex;align-items:center;gap:6px}
+.irow .acts{grid-column:1 / -1;display:flex;gap:6px;flex-wrap:wrap}
+.ivote{background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:4px 12px;font-weight:700;font-size:.85rem;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.ivote:hover{border-color:var(--accent);color:var(--ink)}
+.ivote[aria-pressed=true]{background:var(--pop);border-color:var(--pop);color:var(--on-pop)}
+.ivote:disabled{cursor:default}
+.irow .x{background:none;border:none;color:var(--muted);padding:0 4px;font-size:1rem}
+.ideas form{display:flex;gap:8px}
+.ideas form input{flex:1;min-width:0}
+.evpick{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.evpick label{font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.evpick select{font:inherit;font-weight:600;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:7px 12px;min-height:38px;flex:1 1 220px;max-width:100%;min-width:0}
+.evpick select:focus-visible{outline:2px solid var(--pop);outline-offset:2px}
+.backbar a{font-weight:600;color:var(--accent);text-decoration:none;font-size:.88rem}
+.backbar a:hover{text-decoration:underline}
+.history{display:flex;flex-direction:column;gap:8px}
+.hist{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.hrow{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 12px;align-items:center;padding:9px 12px;border-top:1px solid var(--line);color:var(--ink);text-decoration:none}
+.hrow:first-child{border-top:none}
+.hrow:hover{background:var(--bg)}
+.hrow .t{font-weight:700;font-family:var(--display);overflow-wrap:anywhere}
+.hrow .d{font-size:.83rem;color:var(--muted);grid-column:1}
+.hrow .go{grid-row:1 / span 2;grid-column:2;color:var(--accent);font-weight:600;font-size:.85rem;white-space:nowrap}
+.hrow .open{display:inline-block;font-size:.74rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;background:var(--sun);color:#302782;border-radius:999px;padding:1px 7px;margin-left:6px;vertical-align:2px}
+.ev{flex:none;display:flex;flex-direction:column;align-items:flex-start;gap:1px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:5px 12px;color:var(--ink);text-decoration:none;font-size:.85rem;max-width:200px}
+.ev .t{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.ev .s{font-size:.74rem;color:var(--muted)}
+.ev .s.open::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--pop);margin-right:5px;vertical-align:1px}
+.ev[aria-current=true]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.ev[aria-current=true] .s{color:var(--accent-ink);opacity:.8}
+.closedbar{background:var(--yes-soft);color:var(--ink);border-radius:var(--r);padding:10px 12px;font-size:.88rem}
+.closedbar strong{color:var(--yes)}
+.closedbar{display:flex;flex-direction:column;gap:8px}
+.wrap.is-closed .poll{display:none}
+.closedbar{background:var(--surface);border:1px solid var(--line);padding:0;overflow:hidden;gap:0}
+.recap{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
+.recap .col{display:flex;flex-direction:column;gap:2px;padding:14px 16px;border-left:1px solid var(--line);min-width:0}
+.recap .col:first-child{border-left:none}
+.recap .k{font-family:var(--display);font-weight:800;font-size:.83rem;color:var(--head);letter-spacing:.02em}
+.ppl{list-style:none;margin:4px 0 0;padding:0;display:flex;flex-direction:column}
+.ppl li{display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-top:1px solid var(--line);font-size:.88rem}
+.ppl li:first-child{border-top:none}
+.ppl .nm{overflow-wrap:anywhere;min-width:0}
+.ppl .st{font-size:.74rem;font-weight:700;flex:none;padding:1px 8px;border-radius:999px}
+.ppl .yes .st{background:var(--yes-soft);color:var(--yes)}
+.ppl .maybe .st{background:var(--maybe-soft);color:var(--maybe)}
+.ppl .no .st{background:var(--no-soft);color:var(--no)}
+.recap .v{font-family:var(--display);font-weight:700;font-size:1.1rem;overflow-wrap:anywhere}
+.recap .v::first-letter{text-transform:uppercase}
+.recap .s{font-size:.83rem;color:var(--muted);overflow-wrap:anywhere}
+.recap .s b{font-weight:600}
+.closedbar .acts{padding:10px 16px;border-top:1px solid var(--line);background:var(--bg)}
+.closedbar .ok:not(:empty){padding:0 16px 10px;background:var(--bg)}
+@media (max-width:520px){.recap{grid-template-columns:1fr}.recap .col{border-left:none;border-top:1px solid var(--line)}.recap .col:first-child{border-top:none}}
+.closedbar .acts{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.closedbar a.btn{text-decoration:none;display:inline-flex;align-items:center}
+.closedbar input[type=time]{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:5px 8px;min-height:36px}
+.closedbar .ok{font-size:.83rem;color:var(--yes)}
+.closedbar textarea{font:inherit;font-size:.83rem;width:100%;min-height:60px;border:1px solid var(--line);border-radius:8px;padding:6px;background:var(--surface);color:var(--ink)}
+.admin{border:1px dashed var(--line);border-radius:var(--r);padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.admin summary{cursor:pointer;font-weight:700;font-family:var(--display);color:var(--accent);font-size:.90rem}
+.admin .row{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end}
+.admin .f{display:flex;flex-direction:column;gap:3px;min-width:0}
+.admin .f.grow{flex:1 1 220px}
+.admin label{font-size:.78rem;font-weight:600;color:var(--muted)}
+.admin .chk{display:flex;gap:6px;align-items:center;font-size:.85rem}
+.admin .chk label{font-size:.85rem;color:var(--ink);font-weight:400}
+.csel{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:6px 10px;min-height:36px;max-width:100%}
+.admin .ok{font-size:.83rem;color:var(--yes);margin:0}
+.admin .ok:empty{display:none}
+@media (max-width:520px){
+  .r{grid-template-columns:44px minmax(0,1fr);}
+  .right{grid-column:1 / -1;justify-content:space-between}
+  .votes{flex:1}.vote{flex:1;width:auto}
+  .detail{padding-left:12px}
+}
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="evpick" id="evpick" hidden>
+      <label for="evselect">Sondage</label>
+      <select id="evselect"></select>
+    </div>
+    <div class="hero">
+      <span class="bub" style="left:8%;width:14px;height:14px;animation-duration:6s"></span>
+      <span class="bub" style="left:22%;width:8px;height:8px;animation-duration:4.5s;animation-delay:1.2s"></span>
+      <span class="bub" style="left:47%;width:18px;height:18px;animation-duration:7s;animation-delay:.6s"></span>
+      <span class="bub" style="left:63%;width:10px;height:10px;animation-duration:5s;animation-delay:2.4s"></span>
+      <span class="bub" style="left:78%;width:22px;height:22px;animation-duration:8s;animation-delay:1.8s"></span>
+      <span class="bub" style="left:90%;width:9px;height:9px;animation-duration:5.5s;animation-delay:.2s"></span>
+      <h1><span id="evtitle">Afterwork</span> <span aria-hidden="true">🥂</span></h1>
+      <span class="tag">Qui ? Quoi ? Quand ?</span>
+    </div>
+    <span class="status" id="status">Chargement des sondages…</span>
+  </header>
+
+  <div class="backbar" id="backbar" hidden><a href="#" id="backlink">← Revenir au sondage en cours</a></div>
+  <div class="closedbar" id="closedbar" hidden></div>
+
+  <section class="qui poll" id="namebar" hidden>
+    <h2 class="sec c-qui">Qui ?</h2>
+    <div class="namebar">
+    <form id="nameform">
+      <div class="nf"><label for="f-name">Prénom</label><input type="text" id="f-name" maxlength="40" autocomplete="given-name" required></div>
+      <div class="nf"><label for="f-mail">E-mail</label><input type="email" id="f-mail" maxlength="120" autocomplete="email" required></div>
+      <button class="btn" type="submit" id="f-name-ok">Valider</button>
+    </form>
+    <div id="nameview" hidden>Vous votez en tant que <strong id="myname"></strong> · <button class="link" id="rename" type="button">Modifier</button></div>
+    <p class="msg" id="name-msg"></p>
+    <div class="who-voted" id="whovoted"></div>
+    <div class="actas" id="actas" hidden>
+      <label for="actsel">Organisateur · voter pour</label>
+      <select id="actsel" class="csel"></select>
+      <span id="newpbox" hidden><input type="text" id="newp" maxlength="40" aria-label="Nom du participant"><button class="btn" type="button" id="newpok">Ajouter</button></span>
+    </div>
+    <div class="actnote" id="actnote" hidden></div>
+    </div>
+  </section>
+
+  <section class="ideas poll">
+    <h2 class="sec c-quoi">Quoi ?</h2>
+    <div class="chips rows" id="idealist"></div>
+    <form id="ideaform" hidden>
+      <input type="text" id="f-idea" maxlength="80" placeholder="Votre idée" aria-label="Votre idée">
+      <button class="btn" type="submit">Proposer</button>
+    </form>
+    <p class="msg" id="idea-msg"></p>
+  </section>
+
+  <h2 class="sec poll c-quand">Quand ?</h2>
+  <div class="legend poll" aria-hidden="true">
+    <span>🙌 Je viens</span>
+    <span>🤔 Peut-être</span>
+    <span>🙅 Pas dispo</span>
+  </div>
+
+  <div class="viewsw poll" id="viewsw" role="group" aria-label="Affichage">
+    <button type="button" data-view="list" aria-pressed="true">Liste</button>
+    <button type="button" data-view="cal" aria-pressed="false">Calendrier</button>
+  </div>
+  <section class="calv poll" id="calv" hidden></section>
+  <section class="list poll" id="list" aria-live="polite"><div class="empty">Chargement…</div></section>
+
+  <details class="propose poll" id="propose" hidden>
+    <summary>Proposer une autre date</summary>
+    <form id="proposeform" class="row">
+      <input type="date" id="f-date" required aria-label="Date">
+      <input type="text" id="f-note" maxlength="200" placeholder="Commentaire (facultatif)" aria-label="Commentaire">
+      <button class="btn" type="submit" id="f-submit">Ajouter</button>
+    </form>
+    <p class="msg" id="f-msg"></p>
+  </details>
+
+  <section class="history" id="history" hidden>
+    <h2 class="sec">Historique</h2>
+    <nav class="hist" id="histlist" aria-label="Autres sondages"></nav>
+  </section>
+
+  <section class="admin" id="admin" hidden>
+    <details id="newev">
+      <summary>Nouveau sondage</summary>
+      <form id="evform" style="display:flex;flex-direction:column;gap:8px;padding-top:8px">
+        <div class="row">
+          <div class="f grow"><label for="e-title">Nom</label><input type="text" id="e-title" maxlength="60" required></div>
+        </div>
+        <div class="row">
+          <div class="f"><label for="e-start">Du</label><input type="date" id="e-start" required></div>
+          <div class="f"><label for="e-end">Au</label><input type="date" id="e-end" required></div>
+          <div class="chk"><input type="checkbox" id="e-week" checked><label for="e-week">Soirs de semaine uniquement</label></div>
+        </div>
+        <div class="row"><button class="btn" type="submit" id="e-submit">Créer le sondage</button></div>
+        <p class="msg" id="e-msg"></p>
+      </form>
+    </details>
+    <div class="actions" id="evactions"></div>
+    <p class="ok" id="admin-ok"></p>
+  </section>
+</div>
+
+<script>
+(() => {
+  const $ = s => document.querySelector(s);
+  const LEGACY = "ev-2026-12";
+  const S = { mails: {}, events: [], dates: [], votes: {}, comments: [], ideas: [], me: null, owner: false, admin: false, canWrite: true, loaded: false, cur: null };
+  const ui = { open: new Set(), drafts: {}, confirmDel: null, editingName: false, confirmClose: false, sel: new Set(), view: "list" };
+  try { if (localStorage.getItem("aw-view") === "cal") ui.view = "cal"; } catch {}
+  let db = null, user = null, profiles = {};
+
+  const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  const parseD = iso => { const [y,m,d] = iso.split("-").map(Number); return new Date(y, m-1, d); };
+  const iso = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  const todayISO = () => iso(new Date());
+  const myName = () => (S.me && S.votes[S.me]?.name) || "";
+  const myMail = () => (S.me && S.mails[S.me]) || "";
+  const W = () => ui.actAs || S.me; // personne dont on modifie les votes (soi, ou un participant pour l'organisateur)
+  // créateur du sondage (ou organisateur) : peut retenir la date / l'activité et clôturer ; rouvrir reste réservé à l'organisateur
+  const mgr = ev => !!ev && (S.admin || (!!S.me && ev.createdBy === S.me));
+  const ready = () => !!(ui.actAs || (myName() && myMail()));
+  const nameOf = id => (S.votes[id]?.name || "").trim() || profiles[id]?.name || "Anonyme";
+  const evOf = x => x.eventId || LEGACY;
+  const curEv = () => S.events.find(e => e.id === S.cur) || null;
+  const isClosed = () => !!curEv()?.closed;
+  const canAct = () => S.me && S.canWrite && curEv() && !isClosed();
+  const curDates = () => S.dates.filter(d => evOf(d) === S.cur);
+  const curIdeas = () => S.ideas.filter(i => evOf(i) === S.cur);
+  const monthLabel = isoD => isoD ? parseD(isoD).toLocaleDateString("fr-FR", { month:"long", year:"numeric" }) : "";
+
+  function setStatus(t, warn){ const el = $("#status"); el.textContent = t; el.classList.toggle("warn", !!warn); }
+
+  function tally(dateId){
+    const r = { yes:[], maybe:[], no:[] };
+    for (const [uid, v] of Object.entries(S.votes)) { const a = v?.answers?.[dateId]; if (r[a]) r[a].push(uid); }
+    return r;
+  }
+  function participants(evId){
+    const ids = new Set(S.dates.filter(d => evOf(d) === evId).map(d => d.id));
+    return Object.entries(S.votes).filter(([,v]) => Object.keys(v?.answers || {}).some(k => ids.has(k))).map(([u]) => u);
+  }
+
+  // --- sélection du sondage (lien partageable #ev-...) ---
+  // Un sondage reste « à venir » jusqu'à sa date retenue (ou sa date de fin), même clôturé ; ensuite il passe dans l'historique.
+  function endOf(e){
+    const ch = e.chosen && S.dates.find(d => d.id === e.chosen);
+    return ch ? ch.date : (e.end || e.start || "");
+  }
+  const isUpcoming = e => endOf(e) >= todayISO();
+  const byStartDesc = (a,b) => (b.start||"").localeCompare(a.start||"");
+  function defaultEvent(){
+    const up = S.events.filter(isUpcoming).sort(byStartDesc);
+    return (up[0] || [...S.events].sort(byStartDesc)[0] || {}).id || null;
+  }
+  function pickEvent(){
+    const h = location.hash.slice(1);
+    S.cur = (h && S.events.some(e => e.id === h)) ? h : defaultEvent();
+  }
+  document.getElementById("evselect").addEventListener("change", e => { if (e.target.value) location.hash = e.target.value; });
+  addEventListener("hashchange", () => { pickEvent(); ui.open.clear(); ui.sel.clear(); ui.confirmClose = false; render(); scrollTo({ top: 0, behavior: reduce ? "auto" : "smooth" }); });
+
+  function renderEvents(){
+    const def = defaultEvent();
+    $("#backbar").hidden = !def || S.cur === def;
+    $("#backlink").href = "#" + (def || "");
+    const up = S.events.filter(isUpcoming).sort((a,b) => (a.start||"").localeCompare(b.start||""));
+    const sel = $("#evselect");
+    $("#evpick").hidden = !up.length || (up.length === 1 && up[0].id === S.cur);
+    const curUp = up.some(e => e.id === S.cur);
+    sel.innerHTML = (curUp ? "" : `<option value="" selected disabled>Historique : ${esc(curEv()?.title || "")}</option>`) +
+      up.map(e => `<option value="${e.id}"${e.id === S.cur ? " selected" : ""}>${esc(e.title || monthLabel(e.start))}${e.closed ? " (clôturé)" : ""}</option>`).join("");
+    const others = S.events.filter(e => !isUpcoming(e) && e.id !== S.cur).sort(byStartDesc);
+    $("#history").hidden = !others.length;
+    $("#histlist").innerHTML = others.map(e => {
+      const n = participants(e.id).length;
+      const ch = e.chosen && S.dates.find(d => d.id === e.chosen);
+      const act = e.chosenIdea && S.ideas.find(i => i.id === e.chosenIdea);
+      const when = (ch ? "🎉 " + parseD(ch.date).toLocaleDateString("fr-FR", { weekday:"long", day:"numeric", month:"long" }) : (e.closed ? "Pas de date retenue" : "Vote en cours")) + (act ? " · " + act.text : "");
+      return `<a class="hrow" href="#${e.id}"><span class="t">${esc(e.title || monthLabel(e.start))}${e.closed ? "" : `<span class="open">En cours</span>`}</span><span class="d">${esc(when)} · ${n} participant${n>1?"s":""}</span><span class="go">Voir →</span></a>`;
+    }).join("");
+    const ev = curEv();
+    $("#evtitle").textContent = ev ? (ev.title || "Afterwork") : "Afterwork";
+    if (!curEv()?.closed) { $("#closedbar").hidden = true; $(".wrap").classList.remove("is-closed"); }
+    $(".legend").hidden = !!ev?.closed;
+    $("#propose").hidden = !canAct();
+  }
+
+  function closeForm(ev){
+    const sc = id => { const t = tally(id); return t.yes.length*2 + t.maybe.length; };
+    const ds = curDates().sort((a,b) => sc(b.id) - sc(a.id) || a.date.localeCompare(b.date));
+    const likes = id => Object.values(S.votes).filter(v => v?.likes?.[id]).length;
+    const is = curIdeas().sort((a,b) => likes(b.id) - likes(a.id));
+    const selD = ui.closeD || ev.chosen || ds[0]?.id, selI = ui.closeI ?? (ev.chosenIdea || is[0]?.id);
+    const lab = d => { const t = tally(d.id); return `${parseD(d.date).toLocaleDateString("fr-FR",{weekday:"long",day:"numeric",month:"long"})} — ${t.yes.length} dispo, ${t.maybe.length} peut-être`; };
+    return `<div style="display:flex;flex-direction:column;gap:8px;width:100%">
+      <strong>Clôturer « ${esc(ev.title)} »</strong>
+      <div class="f"><label for="close-date">Date retenue</label><select id="close-date" class="csel">${ds.map(d => `<option value="${d.id}"${d.id === selD ? " selected" : ""}>${esc(lab(d))}</option>`).join("")}</select></div>
+      ${is.length ? `<div class="f"><label for="close-idea">Activité retenue</label><select id="close-idea" class="csel"><option value="">Aucune</option>${is.map(i => `<option value="${i.id}"${i.id === selI ? " selected" : ""}>${esc(i.text)} — ${likes(i.id)} vote${likes(i.id)>1?"s":""}</option>`).join("")}</select></div>` : ""}
+      <div class="actions"><button class="btn" data-act="close">Clôturer le sondage</button><button class="ghost" data-act="cancelclose">Annuler</button></div>
+    </div>`;
+  }
+  function renderAdmin(){
+    const box = $("#admin");
+    const can = S.admin || (S.me && S.canWrite);
+    box.hidden = !can;
+    if (!can) return;
+    const ev = curEv();
+    $("#evactions").innerHTML = !ev || !(S.admin || mgr(ev)) ? "" : (ev.closed
+      ? (S.admin ? `<button class="ghost" data-act="reopen">Rouvrir « ${esc(ev.title)} »</button>` : "")
+      : ui.confirmClose
+        ? closeForm(ev)
+        : `<button class="ghost" data-act="askclose">Clôturer « ${esc(ev.title)} »</button>`);
+  }
+
+  function renderName(){
+    const bar = $("#namebar");
+    if (!S.me || !S.canWrite) { bar.hidden = true; return; }
+    bar.hidden = false;
+    const n = myName(), mail = myMail(), editing = !n || !mail || ui.editingName;
+    $("#nameform").hidden = !editing; $("#nameview").hidden = editing;
+    $("#myname").textContent = n + (mail ? ` (${mail})` : "");
+    if (editing && document.activeElement !== $("#f-name") && !$("#f-name").value) $("#f-name").value = n;
+    if (editing && document.activeElement !== $("#f-mail") && !$("#f-mail").value) $("#f-mail").value = mail || ui.profileMail || "";
+    const ax = $("#actas"), showAx = S.admin && canAct();
+    ax.hidden = !showAx;
+    if (!showAx) ui.actAs = null;
+    if (ui.actAs && !S.votes[ui.actAs]) ui.actAs = null;
+    if (showAx && document.activeElement !== $("#actsel")) {
+      const others = Object.entries(S.votes).filter(([id]) => id !== S.me).sort((a,b) => nameOf(a[0]).localeCompare(nameOf(b[0])));
+      $("#actsel").innerHTML = `<option value="">Moi</option>` + others.map(([id]) => `<option value="${id}"${id === ui.actAs ? " selected" : ""}>${esc(nameOf(id))}</option>`).join("") + `<option value="__new">+ Ajouter un participant…</option>`;
+      if (ui.newP) $("#actsel").value = "__new";
+    }
+    $("#newpbox").hidden = !ui.newP;
+    const note = $("#actnote");
+    note.hidden = !ui.actAs;
+    note.textContent = ui.actAs ? `Vous modifiez les réponses de ${nameOf(ui.actAs)}.` : "";
+    const voters = S.cur ? participants(S.cur).map(nameOf) : [];
+    $("#whovoted").textContent = voters.length ? `Ont répondu (${voters.length}) : ${voters.join(", ")}` : "Personne n'a encore répondu.";
+  }
+
+  function renderIdeas(){
+    const box = $("#idealist");
+    $("#ideaform").hidden = !canAct();
+    if (!S.loaded) return;
+    const ev = curEv(), closed = isClosed();
+    $(".ideas").hidden = closed && !curIdeas().length;
+    const likers = id => Object.entries(S.votes).filter(([,v]) => v?.likes?.[id]).map(([u]) => u);
+    let ideas = curIdeas().map(i => ({ ...i, l: likers(i.id) })).sort((a,b) => (ev?.chosenIdea === b.id) - (ev?.chosenIdea === a.id) || b.l.length - a.l.length || (a.at||0) - (b.at||0));
+    if (closed) ideas = ideas.slice(0, 1); // sondage terminé : seulement l'activité retenue (ou la plus votée)
+    if (!ideas.length) { box.innerHTML = ""; return; }
+    const leadId = !ev?.chosenIdea && ideas[0].l.length ? ideas[0].id : null;
+    box.innerHTML = ideas.map(i => {
+      const mine = S.me && i.l.includes(W());
+      const chosen = ev?.chosenIdea === i.id || (closed && !ev?.chosenIdea);
+      const canDel = canAct() && (i.by === S.me || S.owner);
+      const n = i.l.length;
+      return `<div class="irow${chosen ? " chosen" : i.id === leadId ? " lead" : ""}">
+        <div class="top"><span class="t">${esc(i.text)}</span>${chosen ? "" : i.id === leadId ? `<span class="badge lead">🔥 En tête</span>` : ""}</div>
+        ${n ? `<div class="who">${esc(i.l.map(nameOf).join(", "))}</div>` : ""}
+        <div class="iv">
+          ${canAct() ? `<button class="ivote" data-act="like" data-iid="${i.id}" aria-pressed="${!!mine}">👍 ${n}</button>` : `<span class="ivote" aria-label="${n} vote${n>1?"s":""}">👍 ${n}</span>`}
+          ${canDel ? `<button class="x" data-act="delidea" data-iid="${i.id}" aria-label="Supprimer l'idée">×</button>` : ""}
+        </div>
+        ${mgr(ev) && !closed ? `<div class="acts"><button class="ghost" data-act="chooseidea" data-iid="${i.id}">${ev?.chosenIdea === i.id ? "Annuler le choix" : "Retenir cette activité"}</button></div>` : ""}
+      </div>`;
+    }).join("");
+  }
+
+  // --- invitation Outlook pour la date retenue ---
+  const pad = n => String(n).padStart(2, "0");
+  const stamp = d => { const o = -d.getTimezoneOffset(), a = Math.abs(o); return `${iso(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}:00${o >= 0 ? "+" : "-"}${pad(a/60|0)}:${pad(a%60)}`; };
+  function goingIds(){
+    const ev = curEv(); if (!ev) return [];
+    const sc = id => { const t = tally(id); return t.yes.length*2 + t.maybe.length; };
+    const ch = ev.chosen || curDates().sort((a,b) => sc(b.id) - sc(a.id))[0]?.id;
+    if (!ch) return []; const t = tally(ch); return [...t.yes, ...t.maybe];
+  }
+  function renderInvite(){
+    const bar = $("#closedbar"), ev = curEv();
+    $(".wrap").classList.toggle("is-closed", !!ev?.closed);
+    if (!ev?.closed) { bar.hidden = true; return; }
+    // sondage terminé : récap en colonnes Quand / Quoi / Qui (date retenue ou la plus demandée)
+    const sc = id => { const t = tally(id); return t.yes.length*2 + t.maybe.length; };
+    const ch = (ev.chosen && S.dates.find(d => d.id === ev.chosen)) || curDates().sort((a,b) => sc(b.id) - sc(a.id))[0];
+    if (!ch) { bar.hidden = true; return; }
+    const upcoming = ch.date >= todayISO();
+    const act = ev.chosenIdea ? S.ideas.find(i => i.id === ev.chosenIdea) : null;
+    const time = ev.time || "18:30";
+    const [h, m] = time.split(":").map(Number);
+    const s = parseD(ch.date); s.setHours(h, m, 0, 0);
+    const e = new Date(s.getTime() + 150 * 60000);
+    const q = new URLSearchParams({ path: "/calendar/action/compose", rru: "addevent", subject: ev.title || "Afterwork", startdt: stamp(s), enddt: stamp(e), location: act ? act.text : "", body: `${ev.title || "Afterwork"}${act ? " · " + act.text : ""}` });
+    const url = "https://outlook.office.com/calendar/0/deeplink/compose?" + q.toString();
+    const tt = tally(ch.id), going = [...tt.yes, ...tt.maybe];
+    const whenTxt = parseD(ch.date).toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
+    if (document.activeElement?.closest?.("#closedbar")) return; // ne pas écraser une saisie en cours
+    bar.hidden = false;
+    const n = tt.yes.length, L = arr => esc(arr.map(nameOf).join(", "));
+    bar.innerHTML = `<div class="recap">
+        <div class="col"><span class="k">Quand ?</span><span class="v">${esc(whenTxt)}</span><span class="s">${esc(time.replace(":", "h"))}</span></div>
+        <div class="col"><span class="k">Quoi ?</span><span class="v">${act ? esc(act.text) : "À définir"}</span></div>
+        <div class="col"><span class="k">Qui ?</span><span class="v">${n} personne${n>1?"s":""}</span>
+          <ul class="ppl">${[...tt.yes.map(i => [i, "yes", "Vient"]), ...tt.maybe.map(i => [i, "maybe", "Peut-être"]), ...tt.no.map(i => [i, "no", "Pas dispo"])].map(([i, c, l]) => `<li class="${c}"><span class="nm">${esc(nameOf(i))}</span><span class="st">${l}</span></li>`).join("")}</ul>
+        </div>
+      </div>
+      ${upcoming ? `<div class="acts">
+        <a class="btn" href="${esc(url)}" target="_blank" rel="noopener">${mgr(ev) ? "Créer l'invitation Outlook" : "Ajouter à mon agenda Outlook"}</a>
+        ${mgr(ev) ? `<button class="ghost" type="button" data-act="copymails">Copier les adresses (${going.length})</button>
+        <label class="ghost" style="display:inline-flex;gap:6px;align-items:center">Heure <input type="time" id="evtime" value="${esc(time)}"></label>` : ""}
+      </div>
+      <span class="ok" id="invite-ok"></span>` : ""}`;
+  }
+  $("#closedbar").addEventListener("click", async e => {
+    const b = e.target.closest("button[data-act=copymails]"); if (!b) return;
+    const going = goingIds();
+    const mails = [...new Set(going.map(id => S.mails[id] || profiles[id]?.email).filter(Boolean))];
+    const ok = $("#invite-ok");
+    if (!mails.length) { ok.textContent = "Aucune adresse disponible : ajoutez les participants à la main dans Outlook."; return; }
+    const txt = mails.join("; ");
+    const missing = going.length - mails.length;
+    try { await navigator.clipboard.writeText(txt); ok.textContent = `${mails.length} adresse${mails.length>1?"s":""} copiée${mails.length>1?"s":""} : collez-les dans le champ « Participants ».${missing ? ` ${missing} sans adresse.` : ""}`; }
+    catch { ok.innerHTML = `<textarea readonly aria-label="Adresses des participants">${esc(txt)}</textarea>`; ok.querySelector("textarea").select(); }
+  });
+  $("#closedbar").addEventListener("change", async e => {
+    if (e.target.id !== "evtime" || !e.target.value) return;
+    try { await db.doc("events/" + S.cur).update({ time: e.target.value }); e.target.blur(); } catch { setStatus("L'heure n'a pas pu être enregistrée.", true); }
+  });
+
+  // --- vue calendrier : sélection de plusieurs dates + réponse groupée ---
+  const EMO = { yes: "🙌", maybe: "🤔", no: "🙅" };
+  function renderCal(){
+    const box = $("#calv"), isCal = ui.view === "cal";
+    document.querySelectorAll("#viewsw button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.view === ui.view)));
+    box.hidden = !isCal; $("#list").hidden = isCal;
+    if (!isCal) return;
+    const ds = curDates(); if (!ds.length) { box.innerHTML = ""; return; }
+    const today = todayISO(), byDate = Object.fromEntries(ds.map(d => [d.date, d]));
+    const live = new Set(ds.filter(d => d.date >= today).map(d => d.id));
+    for (const id of [...ui.sel]) if (!live.has(id)) ui.sel.delete(id);
+    const sorted = ds.map(d => d.date).sort();
+    const first = parseD(sorted[0]), last = parseD(sorted[sorted.length - 1]);
+    const mine = S.votes[W()]?.answers || {};
+    const can = canAct();
+    let html = "";
+    if (can) {
+      const n = ui.sel.size;
+      html += `<div class="caltool">${n ? `<span class="cnt">${n} date${n>1?"s":""}</span>
+        <button class="ivote" data-cact="yes">🙌 Je viens</button><button class="ivote" data-cact="maybe">🤔 Peut-être</button><button class="ivote" data-cact="no">🙅 Pas dispo</button><button class="ghost" data-cact="clear">Effacer</button><button class="ghost" data-cact="none">Désélectionner</button>`
+        : `<span class="hint">Touchez des dates pour les sélectionner</span><button class="ghost" data-cact="all">Tout sélectionner</button>`}</div>`;
+    }
+    for (let m = new Date(first.getFullYear(), first.getMonth(), 1); m <= last; m = new Date(m.getFullYear(), m.getMonth() + 1, 1)) {
+      const days = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate(), lead = (m.getDay() + 6) % 7;
+      let cells = ["L","M","M","J","V","S","D"].map(x => `<span class="dh">${x}</span>`).join("") + "<span></span>".repeat(lead);
+      for (let i = 1; i <= days; i++) {
+        const dd = new Date(m.getFullYear(), m.getMonth(), i), k = iso(dd), d = byDate[k];
+        if (!d) { cells += `<span class="cd off">${i}</span>`; continue; }
+        const a = mine[d.id] || "", y = tally(d.id).yes.length, past = k < today;
+        cells += `<button type="button" class="cd" data-cid="${d.id}" data-wd="${dd.getDay()}" data-a="${a}" aria-pressed="${ui.sel.has(d.id)}" ${!can || past ? "disabled" : ""} aria-label="${esc(dd.toLocaleDateString("fr-FR",{weekday:"long",day:"numeric",month:"long"}))}, ${y} dispo">
+          ${y ? `<span class="c">${y}</span>` : ""}<span class="n">${i}</span><span class="m">${EMO[a] || ""}</span></button>`;
+      }
+      html += `<div class="mon"><h3>${m.toLocaleDateString("fr-FR",{month:"long",year:"numeric"})}</h3><div class="grid">${cells}</div></div>`;
+    }
+    box.innerHTML = html;
+  }
+  $("#viewsw").addEventListener("click", e => {
+    const b = e.target.closest("button[data-view]"); if (!b) return;
+    ui.view = b.dataset.view; try { localStorage.setItem("aw-view", ui.view); } catch {}
+    renderCal();
+  });
+  $("#calv").addEventListener("click", e => {
+    const cell = e.target.closest("button.cd");
+    if (cell) { const id = cell.dataset.cid; ui.sel.has(id) ? ui.sel.delete(id) : ui.sel.add(id); renderCal(); return; }
+    const b = e.target.closest("button[data-cact]"); if (!b) return;
+    const act = b.dataset.cact;
+    if (act === "all") { curDates().filter(d => d.date >= todayISO()).forEach(d => ui.sel.add(d.id)); renderCal(); return; }
+    if (act === "none") { ui.sel.clear(); renderCal(); return; }
+    if (!canAct()) return;
+    if (!ready()) { needName(); return; }
+    const answers = { ...(S.votes[W()]?.answers || {}) };
+    for (const id of ui.sel) { if (act === "clear") delete answers[id]; else answers[id] = act; }
+    const liveIds = new Set(S.dates.map(d => d.id));
+    for (const k of Object.keys(answers)) if (!liveIds.has(k)) delete answers[k];
+    if (act === "yes") confetti(b);
+    ui.sel.clear();
+    S.votes[W()] = { ...(S.votes[W()] || {}), answers }; render(); saveMine();
+  });
+
+  let renderSeq = 0;
+  async function render(){
+    if (!S.loaded) return;
+    pickEvent();
+    renderEvents(); renderAdmin(); renderName(); renderIdeas();
+    const seq = ++renderSeq;
+    const list = $("#list");
+    const active = document.activeElement;
+    const focusId = active && list.contains(active) ? active.id : null;
+
+    if (!curEv()) {
+      list.innerHTML = `<div class="empty">${S.me && S.canWrite ? "Aucun sondage pour l'instant. Créez-en un avec « Nouveau sondage » en bas de page." : "Aucun sondage en cours pour l'instant."}</div>`;
+      return;
+    }
+    const today = todayISO(), ev = curEv(), closed = isClosed();
+    let dates = curDates();
+    if (closed && dates.length) {
+      // sondage terminé : seulement la date retenue (ou la plus demandée)
+      const pick = dates.find(d => d.id === ev.chosen) || [...dates].sort((a,b) => { const ta = tally(a.id), tb = tally(b.id); return (tb.yes.length*2+tb.maybe.length) - (ta.yes.length*2+ta.maybe.length); })[0];
+      dates = [pick];
+    }
+    if (!dates.length){ list.innerHTML = `<div class="empty">Aucune date pour ce sondage.</div>`; return; }
+
+    const ids = new Set([...Object.keys(S.votes), ...S.comments.map(c => c.by)].filter(Boolean));
+    if (user && ids.size) { const ps = await user.profiles([...ids]); if (seq !== renderSeq) return; profiles = ps; }
+    renderInvite();
+
+    const tallies = Object.fromEntries(dates.map(d => [d.id, tally(d.id)]));
+    const score = d => { const t = tallies[d.id]; return t.yes.length*2 + t.maybe.length - t.no.length*0.01; };
+    const isPast = d => !closed && d.date < today;
+    // ordre de popularité : la date la plus demandée en haut, les dates passées en bas
+    dates.sort((a,b) => (isPast(a) - isPast(b)) || (ev.chosen === b.id) - (ev.chosen === a.id) || score(b) - score(a) || a.date.localeCompare(b.date));
+    let leadId = null, best = 0;
+    for (const d of dates) { if (!closed && d.date < today) continue; const t = tallies[d.id]; const sc = t.yes.length*2 + t.maybe.length; if (t.yes.length && sc > best) { best = sc; leadId = d.id; } }
+
+    list.innerHTML = dates.map(d => {
+      const t = tallies[d.id], total = t.yes.length + t.maybe.length + t.no.length;
+      const pct = n => total ? (n/total*100).toFixed(1) : 0;
+      const mine = S.me ? S.votes[W()]?.answers?.[d.id] : null;
+      const past = !closed && d.date < today, chosen = ev.chosen === d.id, lead = !chosen && leadId === d.id;
+      const dt = parseD(d.date);
+      const cm = S.comments.filter(c => c.dateId === d.id).sort((a,b) => (a.at||0)-(b.at||0));
+      const open = ui.open.has(d.id);
+      const label = dt.toLocaleDateString("fr-FR", { weekday:"long", day:"numeric", month:"long" });
+      const nm = arr => arr.map(id => esc(nameOf(id))).join(", ");
+      const names = [t.yes.length ? `<span class="y">${nm(t.yes)}</span>` : "", t.maybe.length ? `<span class="m">${nm(t.maybe)} (peut-être)</span>` : ""].filter(Boolean).join(" · ");
+      const canDel = canAct() && (d.by === S.me || S.owner);
+      const voting = canAct() && !past;
+      return `<div class="item${lead?" lead":""}${chosen?" chosen":""}${past || (closed && !chosen) ?" past":""}">
+        <div class="r">
+          <div class="cal" data-wd="${dt.getDay()}" aria-hidden="true"><div class="w">${dt.toLocaleDateString("fr-FR",{weekday:"short"}).replace(".","")}</div><div class="d">${dt.getDate()}</div></div>
+          <div class="mid">
+            <div class="line1"><span style="position:absolute;left:-9999px">${esc(label)}</span>
+              <span class="counts"><span class="y"><b>${t.yes.length}</b> dispo</span><span class="m"><b>${t.maybe.length}</b> ?</span><span class="n"><b>${t.no.length}</b> non</span></span>
+              ${chosen ? "" : lead ? `<span class="badge lead">🔥 En tête</span>` : past ? `<span class="badge past">Passée</span>` : ""}
+            </div>
+            <div class="bar" aria-hidden="true"><span class="y" style="width:${pct(t.yes.length)}%"></span><span class="m" style="width:${pct(t.maybe.length)}%"></span><span class="n" style="width:${pct(t.no.length)}%"></span></div>
+            ${names ? `<div class="names">${names}</div>` : ""}
+            ${d.note ? `<div class="note">${esc(d.note)}</div>` : ""}
+          </div>
+          <div class="right">
+            ${voting ? `<div class="votes" role="group" aria-label="Votre réponse pour ${esc(label)}">
+              <button class="vote" data-act="vote" data-id="${d.id}" data-v="yes" aria-pressed="${mine==="yes"}" title="Je viens" aria-label="Je viens">🙌</button>
+              <button class="vote" data-act="vote" data-id="${d.id}" data-v="maybe" aria-pressed="${mine==="maybe"}" title="Peut-être" aria-label="Peut-être">🤔</button>
+              <button class="vote" data-act="vote" data-id="${d.id}" data-v="no" aria-pressed="${mine==="no"}" title="Pas dispo" aria-label="Pas dispo">🙅</button>
+            </div>` : ""}
+            <button class="more" data-act="toggle" data-id="${d.id}" aria-expanded="${open}" title="Commentaires et options" aria-label="Commentaires (${cm.length})">💬 ${cm.length || ""}</button>
+          </div>
+        </div>
+        ${open ? `<div class="detail">
+          ${t.no.length ? `<div class="names">Pas dispo : ${nm(t.no)}</div>` : ""}
+          ${cm.map(c => `<div class="cmt"><span class="nm">${esc(nameOf(c.by))}</span><span class="tx">${esc(c.text)}</span>${canAct() && (c.by === S.me || S.owner) ? `<button class="x" data-act="delc" data-cid="${c.id}">Supprimer</button>` : ""}</div>`).join("") || (closed ? `<span class="names">Pas de commentaire.</span>` : "")}
+          ${canAct() ? `<form class="cform" data-id="${d.id}"><input type="text" id="c-${d.id}" maxlength="300" placeholder="Un commentaire sur cette date…" value="${esc(ui.drafts[d.id]||"")}" aria-label="Commentaire"><button class="btn" type="submit">Envoyer</button></form>` : ""}
+          ${(mgr(ev) && !past) || canDel ? `<div class="actions">
+            ${mgr(ev) && !past ? `<button class="ghost" data-act="choose" data-id="${d.id}">${chosen ? "Annuler le choix" : "Retenir cette date"}</button>` : ""}
+            ${canDel ? (ui.confirmDel === d.id
+              ? `Supprimer cette date ? <button class="ghost" data-act="del" data-id="${d.id}" style="color:var(--no);border-color:var(--no)">Oui, supprimer</button><button class="ghost" data-act="canceldel">Annuler</button>`
+              : `<button class="ghost" data-act="askdel" data-id="${d.id}">Supprimer la date</button>`) : ""}
+          </div>` : ""}
+        </div>` : ""}
+      </div>`;
+    }).join("");
+
+    renderCal();
+    if (focusId){ const el = document.getElementById(focusId); if (el) el.focus(); }
+  }
+
+  // --- écritures : un document par personne, votes/<id> = {name, answers, likes} ---
+  let chain = Promise.resolve();
+  function saveMine(){
+    const w = W(), doc = { name: S.votes[w]?.name || "", answers: { ...(S.votes[w]?.answers || {}) }, likes: { ...(S.votes[w]?.likes || {}) } };
+    chain = chain.then(() => db.doc("votes/" + w).set(doc)).catch(e => { setStatus("Votre réponse n'a pas pu être enregistrée. Réessayez.", true); console.warn(e); });
+    return chain;
+  }
+  function needName(){
+    $("#namebar").classList.add("need");
+    $("#name-msg").textContent = "Entrez d'abord votre prénom et votre e-mail pour voter et recevoir l'invitation.";
+    $("#f-name").focus();
+  }
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function confetti(el){
+    if (reduce || !el) return;
+    const r = el.getBoundingClientRect(), cx = r.left + r.width/2, cy = r.top + r.height/2;
+    const cols = ["var(--pop)","var(--accent)","var(--yes)","var(--maybe)"];
+    for (let i = 0; i < 16; i++){
+      const p = document.createElement("span");
+      p.style.cssText = `position:fixed;left:${cx}px;top:${cy}px;width:7px;height:${i%2?7:11}px;border-radius:${i%3?"50%":"2px"};background:${cols[i%4]};pointer-events:none;z-index:50`;
+      document.body.appendChild(p);
+      const a = Math.random()*Math.PI*2, dist = 40 + Math.random()*50;
+      p.animate([{ transform:"translate(-50%,-50%) rotate(0)", opacity:1 },{ transform:`translate(${Math.cos(a)*dist}px,${Math.sin(a)*dist+30}px) rotate(${Math.random()*540}deg)`, opacity:0 }], { duration:700+Math.random()*300, easing:"cubic-bezier(.2,.7,.4,1)" }).onfinish = () => p.remove();
+    }
+  }
+  function vote(dateId, v, el){
+    if (!canAct()) return;
+    if (!ready()) { needName(); return; }
+    const answers = { ...(S.votes[W()]?.answers || {}) };
+    if (answers[dateId] === v) delete answers[dateId]; else { answers[dateId] = v; if (v === "yes") confetti(el); }
+    const live = new Set(S.dates.map(d => d.id));
+    for (const k of Object.keys(answers)) if (!live.has(k)) delete answers[k];
+    S.votes[W()] = { ...(S.votes[W()] || {}), answers }; render(); saveMine();
+  }
+
+  $("#nameform").addEventListener("submit", e => {
+    e.preventDefault();
+    const n = $("#f-name").value.trim().replace(/\s+/g, " "), mail = $("#f-mail").value.trim();
+    if (!n) { $("#name-msg").textContent = "Entrez votre prénom."; return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) { $("#name-msg").textContent = "Entrez une adresse e-mail valide pour recevoir l'invitation."; return; }
+    if (mail !== myMail()) { S.mails[S.me] = mail; db.doc("emails/" + S.me).set({ email: mail }).catch(() => setStatus("Votre e-mail n'a pas pu être enregistré. Réessayez.", true)); }
+    S.votes[S.me] = { ...(S.votes[S.me] || { answers: {} }), name: n };
+    ui.editingName = false; $("#name-msg").textContent = ""; $("#namebar").classList.remove("need");
+    render(); saveMine();
+  });
+  $("#actsel").addEventListener("change", e => {
+    const v = e.target.value;
+    ui.newP = v === "__new"; ui.actAs = ui.newP ? null : (v || null);
+    render(); if (ui.newP) $("#newp").focus();
+  });
+  $("#newpok").addEventListener("click", () => {
+    const n = $("#newp").value.trim().replace(/\s+/g, " ");
+    if (!n || !S.admin) return;
+    const id = "p" + Math.random().toString(36).slice(2, 12);
+    S.votes[id] = { name: n, answers: {}, likes: {} };
+    ui.actAs = id; ui.newP = false; $("#newp").value = "";
+    render(); saveMine();
+  });
+  $("#rename").addEventListener("click", () => { ui.editingName = true; $("#f-name").value = myName(); $("#f-mail").value = myMail(); renderName(); $("#f-name").focus(); });
+
+  $("#ideaform").addEventListener("submit", async e => {
+    e.preventDefault();
+    const msg = $("#idea-msg"), text = $("#f-idea").value.trim();
+    msg.textContent = "";
+    if (!ready()) { needName(); return; }
+    if (!text || !canAct()) return;
+    if (curIdeas().some(i => i.text.toLowerCase() === text.toLowerCase())) { msg.textContent = "Cette activité est déjà proposée : votez pour elle !"; return; }
+    try { await db.collection("ideas").add({ eventId: S.cur, text, by: S.me, at: Date.now() }); $("#f-idea").value = ""; }
+    catch { msg.textContent = "L'idée n'a pas pu être ajoutée. Réessayez."; }
+  });
+  $("#idealist").addEventListener("click", async e => {
+    const b = e.target.closest("button[data-act]"); if (!b || !canAct()) return;
+    const iid = b.dataset.iid;
+    if (b.dataset.act === "like") {
+      if (!ready()) { needName(); return; }
+      const likes = { ...(S.votes[W()]?.likes || {}) };
+      if (likes[iid]) delete likes[iid]; else { likes[iid] = true; confetti(b); }
+      const live = new Set(S.ideas.map(i => i.id));
+      for (const k of Object.keys(likes)) if (!live.has(k)) delete likes[k];
+      S.votes[W()] = { ...(S.votes[W()] || { answers: {} }), likes }; render(); saveMine();
+    } else if (b.dataset.act === "delidea") {
+      try {
+        await db.doc("ideas/" + iid).delete();
+        if (curEv()?.chosenIdea === iid && mgr(curEv())) await db.doc("events/" + S.cur).update({ chosenIdea: null });
+      } catch { $("#idea-msg").textContent = "La suppression a échoué."; }
+    } else if (b.dataset.act === "chooseidea") {
+      try { await db.doc("events/" + S.cur).update({ chosenIdea: curEv()?.chosenIdea === iid ? null : iid }); } catch { $("#idea-msg").textContent = "Seul l'organisateur peut retenir une activité."; }
+    }
+  });
+
+  $("#proposeform").addEventListener("submit", async e => {
+    e.preventDefault();
+    const date = $("#f-date").value, note = $("#f-note").value.trim(), msg = $("#f-msg");
+    msg.textContent = "";
+    if (!ready()) { needName(); return; }
+    if (!date) { msg.textContent = "Choisissez une date."; return; }
+    if (date < todayISO()) { msg.textContent = "Cette date est déjà passée. Choisissez une date à venir."; return; }
+    if (curDates().some(d => d.date === date)) { msg.textContent = "Cette date est déjà dans la liste : votez directement dessus."; return; }
+    $("#f-submit").disabled = true;
+    try { await db.collection("dates").add({ eventId: S.cur, date, note, by: S.me, at: Date.now() }); $("#f-date").value = ""; $("#f-note").value = ""; }
+    catch (err) { msg.textContent = err?.code === "quota_exceeded" ? "Le sondage est plein : supprimez d'anciennes dates." : "La date n'a pas pu être ajoutée. Réessayez."; }
+    finally { $("#f-submit").disabled = false; }
+  });
+
+  $("#list").addEventListener("input", e => { if (e.target.id?.startsWith("c-")) ui.drafts[e.target.id.slice(2)] = e.target.value; });
+  $("#list").addEventListener("submit", async e => {
+    e.preventDefault();
+    const f = e.target.closest(".cform"); if (!f) return;
+    if (!ready()) { needName(); return; }
+    const id = f.dataset.id, inp = f.querySelector("input"), text = inp.value.trim();
+    if (!text) return;
+    try { await db.collection("comments").add({ dateId: id, text, by: S.me, at: Date.now() }); ui.drafts[id] = ""; inp.value = ""; }
+    catch { setStatus("Le commentaire n'a pas pu être envoyé.", true); }
+  });
+  $("#list").addEventListener("click", async e => {
+    const b = e.target.closest("button[data-act]"); if (!b) return;
+    const { act, id } = b.dataset;
+    if (act === "vote") vote(id, b.dataset.v, b);
+    else if (act === "toggle") { ui.open.has(id) ? ui.open.delete(id) : ui.open.add(id); render(); }
+    else if (act === "askdel") { ui.confirmDel = id; render(); }
+    else if (act === "canceldel") { ui.confirmDel = null; render(); }
+    else if (act === "del") {
+      ui.confirmDel = null;
+      try {
+        await db.doc("dates/" + id).delete();
+        for (const c of S.comments.filter(c => c.dateId === id && (c.by === S.me || S.owner))) await db.doc("comments/" + c.id).delete();
+        if (curEv()?.chosen === id && mgr(curEv())) await db.doc("events/" + S.cur).update({ chosen: null });
+      } catch { setStatus("La suppression a échoué.", true); }
+    }
+    else if (act === "delc") { try { await db.doc("comments/" + b.dataset.cid).delete(); } catch { setStatus("La suppression a échoué.", true); } }
+    else if (act === "choose") { try { await db.doc("events/" + S.cur).update({ chosen: curEv()?.chosen === id ? null : id }); } catch { setStatus("Seul l'organisateur peut retenir une date.", true); } }
+  });
+
+  // --- organisateur : nouveau sondage, clôture ---
+  const MONTHS = ["janvier","février","mars","avril","mai","juin","juillet","août","septembre","octobre","novembre","décembre"];
+  function prefillNew(){
+    const t = new Date(), y = t.getMonth() === 11 ? t.getFullYear()+1 : t.getFullYear(), m = (t.getMonth()+1) % 12;
+    const a = new Date(y, m, 1), b = new Date(y, m+1, 0);
+    $("#e-start").value = iso(a); $("#e-end").value = iso(b);
+    $("#e-title").value = `Afterwork de ${MONTHS[m]}`;
+  }
+  $("#e-start").addEventListener("change", () => {
+    const v = $("#e-start").value; if (!v) return;
+    const d = parseD(v);
+    if (!$("#e-end").value || $("#e-end").value < v) $("#e-end").value = iso(new Date(d.getFullYear(), d.getMonth()+1, 0));
+    if (/^Afterwork d(e |')/.test($("#e-title").value) || !$("#e-title").value) { const mo = MONTHS[d.getMonth()]; $("#e-title").value = `Afterwork ${/^[aeiou]/.test(mo) ? "d'" : "de "}${mo}`; }
+  });
+  $("#evform").addEventListener("submit", async e => {
+    e.preventDefault();
+    if (!ready()) { needName(); return; }
+    const title = $("#e-title").value.trim(), start = $("#e-start").value, end = $("#e-end").value, week = $("#e-week").checked, msg = $("#e-msg");
+    msg.textContent = ""; $("#admin-ok").textContent = "";
+    if (!title || !start || !end) { msg.textContent = "Renseignez le nom et les deux dates."; return; }
+    if (end < start) { msg.textContent = "La date de fin doit être après la date de début."; return; }
+    const days = [];
+    for (let d = parseD(start); iso(d) <= end; d.setDate(d.getDate()+1)) { const w = d.getDay(); if (!week || (w > 0 && w < 6)) days.push(iso(d)); }
+    if (days.length > 45) { msg.textContent = `Ça fait ${days.length} dates : réduisez la période (45 au maximum).`; return; }
+    $("#e-submit").disabled = true;
+    try {
+      const id = `ev-${start.slice(0,7)}-${Math.random().toString(36).slice(2,6)}`;
+      await db.doc("events/" + id).set({ title, start, end, createdAt: Date.now(), createdBy: S.me, closed: false, chosen: null });
+      await Promise.all(days.map(day => db.doc(`dates/${id}_${day}`).set({ eventId: id, date: day, note: "", at: Date.now() })));
+      $("#newev").open = false; prefillNew();
+      $("#admin-ok").textContent = `« ${title} » est créé avec ${days.length} date${days.length>1?"s":""}.`;
+      location.hash = id;
+    } catch (err) { msg.textContent = err?.code === "invalid_argument" ? "Seul l'organisateur peut créer un sondage." : "Le sondage n'a pas pu être créé. Réessayez."; }
+    finally { $("#e-submit").disabled = false; }
+  });
+  $("#evactions").addEventListener("change", e => {
+    if (e.target.id === "close-date") ui.closeD = e.target.value;
+    if (e.target.id === "close-idea") ui.closeI = e.target.value;
+  });
+  $("#evactions").addEventListener("click", async e => {
+    const b = e.target.closest("button[data-act]"); if (!b) return;
+    const act = b.dataset.act;
+    if (act === "askclose") { ui.confirmClose = true; ui.closeD = null; ui.closeI = undefined; renderAdmin(); }
+    else if (act === "cancelclose") { ui.confirmClose = false; renderAdmin(); }
+    else if (act === "close" || act === "reopen") {
+      ui.confirmClose = false;
+      const upd = { closed: act === "close" };
+      if (act === "close") {
+        const d = document.getElementById("close-date")?.value, i = document.getElementById("close-idea");
+        if (d) upd.chosen = d;
+        if (i) upd.chosenIdea = i.value || null;
+      }
+      try { await db.doc("events/" + S.cur).update(upd); } catch { setStatus("L'action a échoué.", true); }
+    }
+  });
+
+  // --- démarrage ---
+  async function start(){
+    $("#f-date").min = todayISO(); prefillNew();
+    [db, user] = await Promise.all([claude.use("db"), claude.use("user")]);
+    if (!db) { setStatus("Impossible de joindre le service qui stocke les votes (jsonblob.com). Rechargez la page dans un instant.", true); return; }
+    if (user) {
+      const [id, owner, admin, cw] = await Promise.all([user.id(), user.isOwner(), user.canEdit(), user.can("data.write")]);
+      S.me = id; S.owner = owner; S.admin = owner || admin; S.canWrite = cw !== false;
+      try { ui.profileMail = (await user.me()).email || ""; } catch {}
+    }
+
+    const pending = new Set(["events","dates","votes","comments","ideas","emails"]);
+    const timer = setTimeout(() => setStatus("Les sondages ne sont pas encore accessibles. Vérifiez votre connexion.", true), 10000);
+    const done = (k, snap) => {
+      if (!snap.metadata.fromCache) pending.delete(k);
+      if (!pending.size) { clearTimeout(timer); updateStatus(); }
+      S.loaded = true; render();
+    };
+    const fail = () => { clearTimeout(timer); setStatus("Impossible de charger les sondages pour le moment.", true); };
+
+    db.collection("emails").onSnapshot(s => { S.mails = Object.fromEntries(s.docs.map(d => [d.id, d.data().email]).filter(([,m]) => typeof m === "string")); done("emails", s); }, fail);
+    db.collection("events").onSnapshot(s => { S.events = s.docs.map(d => ({ id: d.id, ...d.data() })); done("events", s); }, fail);
+    db.collection("dates").onSnapshot(s => { S.dates = s.docs.map(d => ({ id: d.id, ...d.data() })).filter(d => typeof d.date === "string"); done("dates", s); }, fail);
+    db.collection("votes").onSnapshot(s => { S.votes = Object.fromEntries(s.docs.map(d => [d.id, d.data()])); done("votes", s); }, fail);
+    db.collection("comments").onSnapshot(s => { S.comments = s.docs.map(d => ({ id: d.id, ...d.data() })); done("comments", s); }, fail);
+    db.collection("ideas").onSnapshot(s => { S.ideas = s.docs.map(d => ({ id: d.id, ...d.data() })).filter(i => typeof i.text === "string"); done("ideas", s); }, fail);
+  }
+  function updateStatus(){
+    if (!S.me) setStatus("Vous consultez les sondages en lecture seule.");
+    else if (!S.canWrite) setStatus("Vous pouvez consulter les sondages, mais pas voter (accès en lecture seule).");
+    else setStatus("");
+  }
+  let tries = 0;
+  (function boot(){ if (window.claude?.use) start(); else if (++tries < 30) setTimeout(boot, 100); else setStatus("La page n'a pas pu démarrer. Rechargez-la.", true); })();
+})();
+</script>
+
+<style>
+.setup{max-width:760px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+.setup p{margin:0}
+.setup .btn{align-self:flex-start}
+.sharebox{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding-bottom:10px;border-bottom:1px dashed var(--line)}
+.sharebox input{flex:1 1 240px;min-width:0}
+.sharebox .hint{flex-basis:100%;margin:0;font-size:.8rem;color:var(--muted)}
+.sharebox .hint a{color:var(--accent)}
+.sharebox .ok{font-size:.8rem;color:var(--yes)}
+</style>
+</body>
+</html>
