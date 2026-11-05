@@ -545,9 +545,10 @@ button.cd:disabled{cursor:default;opacity:.55}
 .drow .d{font-size:.78rem;color:var(--muted)}
 .dact{flex:none;background:var(--accent);color:var(--accent-ink);border:none;border-radius:999px;padding:.3rem .75rem;font-weight:600;font-size:.8rem}
 .dnone{font-size:.85rem;color:var(--muted)}
-/* ---- créneaux midi / soir ---- */
+/* ---- créneaux matin / après-midi / soir ---- */
 .slot{font-size:.7rem;font-weight:700;padding:.1rem .5rem;border-radius:999px;background:var(--accent-soft);color:var(--accent)}
 .slot.am{background:var(--maybe-soft);color:var(--maybe)}
+.slot.mid{background:var(--yes-soft);color:var(--yes)}
 button.cd .sl{position:absolute;left:4px;top:2px;font-size:.6rem;color:var(--muted);font-weight:700}
 /* ---- calendrier : ajout et glisser ---- */
 #calv .grid{touch-action:pan-y;user-select:none;-webkit-user-select:none}
@@ -697,12 +698,12 @@ button.cd .c + .n{margin-top:0}
   <section class="list poll" id="list" aria-live="polite"><div class="empty">Chargement…</div></section>
 
   <details class="propose poll" id="propose" hidden>
-    <summary>Proposer une autre date</summary>
+    <summary>Proposer d'autres dates</summary>
     <form id="proposeform" class="row">
       <input type="hidden" id="f-date">
       <div class="rp" id="rp-prop" aria-label="Date à proposer"></div>
       <input type="hidden" id="f-slot" value="pm">
-      <span class="seg" data-target="f-slot" aria-label="Créneau"><button type="button" data-v="pm" aria-pressed="true">Soir</button><button type="button" data-v="am" aria-pressed="false">Midi</button></span>
+      <span id="fslotseg"></span>
       <input type="text" id="f-note" maxlength="200" placeholder="Commentaire (facultatif)" aria-label="Commentaire">
       <button class="btn" type="submit" id="f-submit">Ajouter</button>
     </form>
@@ -736,7 +737,8 @@ button.cd .c + .n{margin-top:0}
           <div class="chk"><input type="checkbox" id="e-week" checked><label for="e-week">Jours de semaine uniquement</label></div>
         </div>
         <div class="row slots"><span class="lbl">Créneaux</span>
-          <div class="chk"><input type="checkbox" id="e-am"><label for="e-am">Midi</label></div>
+          <div class="chk"><input type="checkbox" id="e-am"><label for="e-am">Matin</label></div>
+          <div class="chk"><input type="checkbox" id="e-mid"><label for="e-mid">Après-midi</label></div>
           <div class="chk"><input type="checkbox" id="e-pm" checked><label for="e-pm">Soir</label></div>
         </div>
         <div class="row"><button class="btn" type="submit" id="e-submit">Créer le sondage</button></div>
@@ -826,13 +828,16 @@ button.cd .c + .n{margin-top:0}
       const n = participants(e.id).length;
       const ch = e.chosen && S.dates.find(d => d.id === e.chosen);
       const act = e.chosenIdea && S.ideas.find(i => i.id === e.chosenIdea);
-      const when = (ch ? parseD(ch.date).toLocaleDateString("fr-FR", { weekday:"short", day:"numeric", month:"short" }) + (slotOf(ch) === "am" ? " midi" : "") : (e.closed ? "Clôturé" : "Vote en cours")) + (act ? " · " + act.text : "");
+      const when = (ch ? parseD(ch.date).toLocaleDateString("fr-FR", { weekday:"short", day:"numeric", month:"short" }) + (slotOf(ch) !== "pm" ? " " + SLOT[slotOf(ch)].toLowerCase() : "") : (e.closed ? "Clôturé" : "Vote en cours")) + (act ? " · " + act.text : "");
       const canClose = !e.closed && mgr(e);
       return `<div class="drow${e.id === S.cur ? " cur" : ""}"><a href="#${e.id}" data-go><span class="t">${esc(e.title || monthLabel(e.start))}</span><span class="d">${esc(when)} · ${n} participant${n>1?"s":""}</span></a>${canClose ? `<button type="button" class="dact" data-dclose="${e.id}">Clôturer</button>` : ""}</div>`;
     };
     $("#dlist-up").innerHTML = up.map(row).join("") || `<span class="dnone">Aucun</span>`;
     $("#dlist-past").innerHTML = S.events.filter(e => !isUpcoming(e)).sort(byStartDesc).map(row).join("") || `<span class="dnone">Aucun</span>`;
     $("#drawnew").hidden = !(S.me && S.canWrite);
+    const al = allowedSlots(curEv());
+    if (!al.includes($("#f-slot").value)) $("#f-slot").value = al[al.length - 1];
+    $("#fslotseg").innerHTML = al.length > 1 ? segHTML("f-slot", $("#f-slot").value, al) : "";
     const ev = curEv();
     $("#evtitle").textContent = ev ? (ev.title || "Afterwork") : "Afterwork";
     if (!curEv()?.closed) { $("#closedbar").hidden = true; $(".wrap").classList.remove("is-closed"); }
@@ -846,10 +851,10 @@ button.cd .c + .n{margin-top:0}
     const likes = id => Object.values(S.votes).filter(v => v?.likes?.[id]).length;
     const is = curIdeas().sort((a,b) => likes(b.id) - likes(a.id));
     const selD = ui.closeD || ev.chosen || ds[0]?.id, selI = ui.closeI ?? (ev.chosenIdea || is[0]?.id);
-    const lab = d => { const t = tally(d.id); return `${parseD(d.date).toLocaleDateString("fr-FR",{weekday:"long",day:"numeric",month:"long"})}${slotOf(d) === "am" ? " (midi)" : ""} — ${t.yes.length} dispo, ${t.maybe.length} peut-être`; };
+    const lab = d => { const t = tally(d.id); return `${parseD(d.date).toLocaleDateString("fr-FR",{weekday:"long",day:"numeric",month:"long"})}${slotOf(d) !== "pm" ? " (" + SLOT[slotOf(d)].toLowerCase() + ")" : ""} — ${t.yes.length} dispo, ${t.maybe.length} peut-être`; };
     return `<div style="display:flex;flex-direction:column;gap:8px;width:100%">
       <strong>Clôturer « ${esc(ev.title)} »</strong>
-      <div class="f"><span class="flabel">Date retenue</span><div class="picks" role="radiogroup" aria-label="Date retenue">${ds.map(d => { const t = tally(d.id); return `<label class="pick"><input type="radio" name="close-date" value="${d.id}"${d.id === selD ? " checked" : ""}><span class="pd">${esc(parseD(d.date).toLocaleDateString("fr-FR",{weekday:"short",day:"numeric",month:"short"}))}${slotOf(d) === "am" ? " · midi" : ""}</span><span class="pc">🙌 ${t.yes.length} · 🤔 ${t.maybe.length}</span></label>`; }).join("")}</div></div>
+      <div class="f"><span class="flabel">Date retenue</span><div class="picks" role="radiogroup" aria-label="Date retenue">${ds.map(d => { const t = tally(d.id); return `<label class="pick"><input type="radio" name="close-date" value="${d.id}"${d.id === selD ? " checked" : ""}><span class="pd">${esc(parseD(d.date).toLocaleDateString("fr-FR",{weekday:"short",day:"numeric",month:"short"}))}${slotOf(d) !== "pm" ? " · " + SLOT[slotOf(d)].toLowerCase() : ""}</span><span class="pc">🙌 ${t.yes.length} · 🤔 ${t.maybe.length}</span></label>`; }).join("")}</div></div>
       ${is.length ? `<div class="f"><span class="flabel">Activité retenue</span><div class="picks" role="radiogroup" aria-label="Activité retenue">${is.map(i => `<label class="pick"><input type="radio" name="close-idea" value="${i.id}"${i.id === selI ? " checked" : ""}><span class="pd">${esc(i.text)}</span><span class="pc">👍 ${likes(i.id)}</span></label>`).join("")}<label class="pick"><input type="radio" name="close-idea" value=""${!selI ? " checked" : ""}><span class="pd">Aucune</span></label></div></div>` : ""}
       <div class="actions"><button class="btn" data-act="close">Clôturer le sondage</button><button class="ghost" data-act="cancelclose">Annuler</button></div>
     </div>`;
@@ -958,11 +963,11 @@ button.cd .c + .n{margin-top:0}
     if (!ch) { bar.hidden = true; return; }
     const upcoming = ch.date >= todayISO();
     const act = ev.chosenIdea ? S.ideas.find(i => i.id === ev.chosenIdea) : null;
-    const isAm = slotOf(ch) === "am";
-    const time = ev.time || (isAm ? "12:00" : "18:30");
+    const sl = slotOf(ch);
+    const time = ev.time || SLOT_T[sl][0];
     const [h, m] = time.split(":").map(Number);
     const s = parseD(ch.date); s.setHours(h, m, 0, 0);
-    const timeEnd = ev.timeEnd || (isAm ? "14:00" : "21:00");
+    const timeEnd = ev.timeEnd || SLOT_T[sl][1];
     const [h2, m2] = timeEnd.split(":").map(Number);
     const e = parseD(ch.date); e.setHours(h2, m2, 0, 0);
     if (e <= s) e.setDate(e.getDate() + 1); // fin après minuit
@@ -976,7 +981,7 @@ button.cd .c + .n{margin-top:0}
       `SUMMARY:${icsEsc(ev.title || "Afterwork")}`, ...(act ? [`LOCATION:${icsEsc(act.text)}`] : []), "END:VEVENT", "END:VCALENDAR"].join("\r\n");
     ui.icsName = (ev.title || "afterwork").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/gi, "-").toLowerCase() + ".ics";
     const tt = tally(ch.id), going = [...tt.yes, ...tt.maybe];
-    const whenTxt = parseD(ch.date).toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" }) + (isAm ? " · midi" : "");
+    const whenTxt = parseD(ch.date).toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" }) + (sl !== "pm" ? " · " + SLOT[sl].toLowerCase() : "");
     if (document.activeElement?.closest?.("#closedbar")) return; // ne pas écraser une saisie en cours
     bar.hidden = false;
     const n = tt.yes.length, L = arr => esc(arr.map(nameOf).join(", "));
@@ -1028,8 +1033,20 @@ button.cd .c + .n{margin-top:0}
 
   // --- vue calendrier : cliquer ou glisser pour sélectionner (vote groupé) ; jour vide = ajouter une date ---
   const EMO = { yes: "🙌", maybe: "🤔", no: "🙅" };
-  const SLOT = { am: "Midi", pm: "Soir" };
-  const slotOf = d => d && d.slot === "am" ? "am" : "pm";
+  // créneaux : matin / après-midi / soir (« pm » = soir, valeur par défaut des anciennes dates)
+  const SLOT = { am: "Matin", mid: "Après-midi", pm: "Soir" };
+  const ORDER = ["am", "mid", "pm"];
+  const SLOT_T = { am: ["09:00", "12:00"], mid: ["14:00", "17:00"], pm: ["18:30", "21:00"] };
+  const slotOf = d => d && SLOT[d.slot] && d.slot !== "pm" ? d.slot : "pm";
+  const sfx = sl => sl === "pm" ? "" : "_" + sl;
+  // créneaux autorisés pour un sondage : ceux choisis à la création (sinon ceux déjà présents, sinon le soir)
+  function allowedSlots(ev){
+    if (ev?.slots?.length) return ORDER.filter(x => ev.slots.includes(x));
+    const have = new Set(S.dates.filter(d => evOf(d) === ev?.id).map(slotOf));
+    return have.size ? ORDER.filter(x => have.has(x)) : ["pm"];
+  }
+  const curAddSlot = ev => { const al = allowedSlots(ev); return al.includes(ui.addSlot) ? ui.addSlot : al[al.length - 1]; };
+  const segHTML = (target, cur, list) => `<span class="seg" data-target="${target}">${list.map(x => `<button type="button" data-v="${x}" aria-pressed="${x === cur}">${SLOT[x]}</button>`).join("")}</span>`;
   function renderCal(){
     const box = $("#calv"), isCal = ui.view === "cal";
     document.querySelectorAll("#viewsw button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.view === ui.view)));
@@ -1038,7 +1055,7 @@ button.cd .c + .n{margin-top:0}
     const ev = curEv(); if (!ev) { box.innerHTML = ""; return; }
     const ds = curDates(), today = todayISO();
     const byDate = {}; ds.forEach(d => (byDate[d.date] ||= []).push(d));
-    Object.values(byDate).forEach(arr => arr.sort((x, y) => (slotOf(x) === "am" ? 0 : 1) - (slotOf(y) === "am" ? 0 : 1)));
+    Object.values(byDate).forEach(arr => arr.sort((x, y) => ORDER.indexOf(slotOf(x)) - ORDER.indexOf(slotOf(y))));
     const live = new Set(ds.filter(d => d.date >= today).map(d => d.id));
     for (const id of [...ui.sel]) if (!live.has(id)) ui.sel.delete(id);
     const sorted = ds.map(d => d.date).sort();
@@ -1046,7 +1063,7 @@ button.cd .c + .n{margin-top:0}
     const lastD = parseD(sorted[sorted.length - 1] || ev.end || today);
     const last = new Date(lastD.getFullYear(), lastD.getMonth() + (ui.calExtra || 0), 1);
     const mine = S.votes[W()]?.answers || {};
-    const can = canAct(), hasAm = ds.some(d => slotOf(d) === "am");
+    const can = canAct(), hasAm = allowedSlots(ev).length > 1 || new Set(ds.map(slotOf)).size > 1;
     let leadId = null, best = 0;
     if (!ev.closed) for (const d of ds) { if (d.date < today) continue; const t = tally(d.id), sc = t.yes.length * 2 + t.maybe.length; if (t.yes.length && sc > best) { best = sc; leadId = d.id; } }
     let html = "";
@@ -1055,7 +1072,7 @@ button.cd .c + .n{margin-top:0}
       html += `<div class="caltool">${n ? `<span class="cnt">${n} créneau${n>1?"x":""}</span>
         <button class="ivote" data-cact="yes">🙌 Je viens</button><button class="ivote" data-cact="maybe">🤔 Peut-être</button><button class="ivote" data-cact="no">🙅 Pas dispo</button><button class="ghost" data-cact="clear">Effacer</button><button class="ghost" data-cact="none">Désélectionner</button>`
         : `<span class="hint">Glissez pour sélectionner plusieurs dates · cliquez un jour vide (+) pour l'ajouter</span><button class="ghost" data-cact="all">Tout sélectionner</button>`}
-        <span class="addslot">Jours ajoutés en <span class="seg" data-target="__addslot"><button type="button" data-v="pm" aria-pressed="${ui.addSlot !== "am"}">Soir</button><button type="button" data-v="am" aria-pressed="${ui.addSlot === "am"}">Midi</button></span></span></div>`;
+        ${allowedSlots(ev).length > 1 ? `<span class="addslot">Jours ajoutés en ${segHTML("__addslot", curAddSlot(ev), allowedSlots(ev))}</span>` : ""}</div>`;
     }
     for (let m = new Date(first.getFullYear(), first.getMonth(), 1); m <= last; m = new Date(m.getFullYear(), m.getMonth() + 1, 1)) {
       const days = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate(), lead = (m.getDay() + 6) % 7;
@@ -1079,15 +1096,16 @@ button.cd .c + .n{margin-top:0}
     if (can) html += `<button class="ghost" data-cact="more">Afficher le mois suivant</button>`;
     box.innerHTML = html;
   }
-  async function addDates(days, slot){
+  async function addDates(days, slot, note = ""){
     const ev = curEv(); if (!ev || !canAct()) return;
     const have = new Set(curDates().map(d => d.date + "|" + slotOf(d)));
     const todo = [...new Set(days)].filter(k => k >= todayISO() && !have.has(k + "|" + slot));
-    if (!todo.length) { renderCal(); return; }
-    const docs = todo.map(k => [`dates/${ev.id}_${k}${slot === "am" ? "_am" : ""}`, { eventId: ev.id, date: k, slot, note: "", by: S.me, at: Date.now() }]);
+    if (!todo.length) { renderCal(); return 0; }
+    const docs = todo.map(k => [`dates/${ev.id}_${k}${sfx(slot)}`, { eventId: ev.id, date: k, slot, note, by: S.me, at: Date.now() }]);
     try { if (db.batch) await db.batch(docs); else await Promise.all(docs.map(([p, d]) => db.doc(p).set(d))); }
-    catch (err) { setStatus("Les dates n'ont pas pu être ajoutées" + (err?.message ? ` (${err.message})` : "") + ".", true); }
+    catch (err) { setStatus("Les dates n'ont pas pu être ajoutées" + (err?.message ? ` (${err.message})` : "") + ".", true); return -1; }
     renderCal();
+    return todo.length;
   }
   $("#viewsw").addEventListener("click", e => {
     const b = e.target.closest("button[data-view]"); if (!b) return;
@@ -1116,7 +1134,7 @@ button.cd .c + .n{margin-top:0}
     const d = drag; drag = null;
     if (d.mode === "sel") { for (const c of d.cells) for (const id of c.dataset.ids.split(",")) d.on ? ui.sel.add(id) : ui.sel.delete(id); renderCal(); return; }
     if (!ready()) { renderCal(); needName(); return; }
-    addDates([...d.cells].map(c => c.dataset.add), ui.addSlot === "am" ? "am" : "pm");
+    addDates([...d.cells].map(c => c.dataset.add), curAddSlot(curEv()));
   });
   addEventListener("pointercancel", () => { if (drag) { drag = null; renderCal(); } });
   $("#calv").addEventListener("change", e => { if (e.target.id === "addslot") ui.addSlot = e.target.value; });
@@ -1124,7 +1142,7 @@ button.cd .c + .n{margin-top:0}
     const cell = e.target.closest("button.cd");
     if (cell) {
       if (e.detail !== 0) return; // la souris et le doigt passent par pointerdown/pointerup ; ici : clavier
-      if (cell.dataset.add) { if (!ready()) { needName(); return; } addDates([cell.dataset.add], ui.addSlot === "am" ? "am" : "pm"); return; }
+      if (cell.dataset.add) { if (!ready()) { needName(); return; } addDates([cell.dataset.add], curAddSlot(curEv())); return; }
       const ids = cell.dataset.ids.split(","), on = !ids.every(id => ui.sel.has(id));
       ids.forEach(id => on ? ui.sel.add(id) : ui.sel.delete(id)); renderCal(); return;
     }
@@ -1186,7 +1204,7 @@ button.cd .c + .n{margin-top:0}
     }
     const today = todayISO(), ev = curEv(), closed = isClosed();
     let dates = curDates();
-    const hasAm = dates.some(x => slotOf(x) === "am");
+    const hasAm = allowedSlots(curEv()).length > 1 || new Set(dates.map(slotOf)).size > 1;
     if (closed && dates.length) {
       // sondage terminé : seulement la date retenue (ou la plus demandée)
       const pick = dates.find(d => d.id === ev.chosen) || [...dates].sort((a,b) => { const ta = tally(a.id), tb = tally(b.id); return (tb.yes.length*2+tb.maybe.length) - (ta.yes.length*2+ta.maybe.length); })[0];
@@ -1362,17 +1380,16 @@ button.cd .c + .n{margin-top:0}
 
   $("#proposeform").addEventListener("submit", async e => {
     e.preventDefault();
-    const date = $("#f-date").value, note = $("#f-note").value.trim(), msg = $("#f-msg");
+    const days = $("#f-date").value.split(",").filter(Boolean), note = $("#f-note").value.trim(), msg = $("#f-msg");
     msg.textContent = "";
     if (!ready()) { needName(); return; }
-    if (!date) { msg.textContent = "Choisissez une date dans le calendrier."; return; }
-    if (date < todayISO()) { msg.textContent = "Cette date est déjà passée. Choisissez une date à venir."; return; }
-    const slot = $("#f-slot").value === "am" ? "am" : "pm";
-    if (curDates().some(d => d.date === date && slotOf(d) === slot)) { msg.textContent = "Cette date est déjà dans la liste : votez directement dessus."; return; }
+    if (!days.length) { msg.textContent = "Choisissez un ou plusieurs jours dans le calendrier."; return; }
+    const slot = allowedSlots(curEv()).includes($("#f-slot").value) ? $("#f-slot").value : allowedSlots(curEv()).slice(-1)[0];
     $("#f-submit").disabled = true;
-    try { await db.collection("dates").add({ eventId: S.cur, date, slot, note, by: S.me, at: Date.now() }); $("#f-date").value = ""; $("#f-note").value = ""; pProp.draw(); }
-    catch (err) { msg.textContent = err?.code === "quota_exceeded" ? "Le sondage est plein : supprimez d'anciennes dates." : "La date n'a pas pu être ajoutée. Réessayez."; }
-    finally { $("#f-submit").disabled = false; }
+    const n = await addDates(days, slot, note);
+    $("#f-submit").disabled = false;
+    if (n === 0) { msg.textContent = "Ces jours sont déjà dans le sondage : votez directement dessus."; return; }
+    if (n > 0) { $("#f-date").value = ""; $("#f-note").value = ""; pProp.draw(); render(); }
   });
 
   $("#list").addEventListener("input", e => { if (e.target.id?.startsWith("c-")) ui.drafts[e.target.id.slice(2)] = e.target.value; });
@@ -1407,30 +1424,31 @@ button.cd .c + .n{margin-top:0}
   // --- organisateur : nouveau sondage, clôture ---
   const MONTHS = ["janvier","février","mars","avril","mai","juin","juillet","août","septembre","octobre","novembre","décembre"];
   // --- sélecteur de dates maison (remplace le calendrier natif du navigateur) ---
-  function makePicker(box, { range, a, b, onPick, base }){
+  function makePicker(box, { range, multi, a, b, onPick, base }){
     const st = { month: null };
-    const get = () => ({ s: a.value, e: range ? b.value : "" });
+    const get = () => ({ s: multi ? "" : a.value, e: range ? b.value : "", list: multi ? a.value.split(",").filter(Boolean) : [] });
     const fmt = k => parseD(k).toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short" });
     function draw(){
-      const { s, e } = get(), today = todayISO();
-      if (!st.month) { const b0 = base && base(); const start = parseD(s || (b0 && b0 > today ? b0 : today)); st.month = new Date(start.getFullYear(), start.getMonth(), 1); }
+      const { s, e, list } = get(), today = todayISO();
+      if (!st.month) { const b0 = base && base(); const start = parseD(s || list[0] || (b0 && b0 > today ? b0 : today)); st.month = new Date(start.getFullYear(), start.getMonth(), 1); }
       const m = st.month, n = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate(), lead = (m.getDay() + 6) % 7;
       let cells = ["L","M","M","J","V","S","D"].map(x => `<span class="rh">${x}</span>`).join("") + "<span></span>".repeat(lead);
       for (let i = 1; i <= n; i++) {
         const dd = new Date(m.getFullYear(), m.getMonth(), i), k = iso(dd), c = ["rd"];
-        if (k === s) c.push("st"); if (range && k === e) c.push("en"); if (range && s && e && k > s && k < e) c.push("in");
+        if (k === s || list.includes(k)) c.push("st"); if (range && k === e) c.push("en"); if (range && s && e && k > s && k < e) c.push("in");
         if (dd.getDay() === 0 || dd.getDay() === 6) c.push("we");
         cells += `<button type="button" class="${c.join(" ")}" data-k="${k}"${k < today ? " disabled" : ""}>${i}</button>`;
       }
-      const sum = range ? (s ? (e ? `Du ${fmt(s)} au ${fmt(e)}` : `Du ${fmt(s)} · choisissez le dernier jour`) : "Choisissez le premier jour") : (s ? fmt(s) : "Choisissez un jour");
+      const sum = multi ? (list.length ? `${list.length} jour${list.length > 1 ? "s" : ""} : ${list.sort().map(fmt).join(", ")}` : "Cliquez sur un ou plusieurs jours") : range ? (s ? (e ? `Du ${fmt(s)} au ${fmt(e)}` : `Du ${fmt(s)} · choisissez le dernier jour`) : "Choisissez le premier jour") : (s ? fmt(s) : "Choisissez un jour");
       box.innerHTML = `<div class="rhead"><button type="button" class="rnav" data-nav="-1" aria-label="Mois précédent">‹</button><strong>${m.toLocaleDateString("fr-FR", { month: "long", year: "numeric" })}</strong><button type="button" class="rnav" data-nav="1" aria-label="Mois suivant">›</button></div><div class="rgrid">${cells}</div><div class="rsum">${esc(sum)}</div>`;
     }
     box.addEventListener("click", ev => {
       const nav = ev.target.closest("[data-nav]");
       if (nav) { st.month = new Date(st.month.getFullYear(), st.month.getMonth() + Number(nav.dataset.nav), 1); draw(); return; }
       const d = ev.target.closest("button.rd:not(:disabled)"); if (!d) return;
-      const k = d.dataset.k, { s, e } = get();
-      if (!range) a.value = k;
+      const k = d.dataset.k, { s, e, list } = get();
+      if (multi) a.value = (list.includes(k) ? list.filter(x => x !== k) : [...list, k]).sort().join(",");
+      else if (!range) a.value = k;
       else if (!s || e || k < s) { a.value = k; b.value = ""; }
       else b.value = k;
       if (onPick) onPick();
@@ -1443,9 +1461,9 @@ button.cd .c + .n{margin-top:0}
     const v = $("#e-start").value; if (!v) return;
     if (/^Afterwork d(e |')/.test($("#e-title").value) || !$("#e-title").value) { const mo = MONTHS[parseD(v).getMonth()]; $("#e-title").value = `Afterwork ${/^[aeiou]/.test(mo) ? "d'" : "de "}${mo}`; }
   } });
-  const pProp = makePicker($("#rp-prop"), { range: false, a: $("#f-date"), base: () => curEv()?.start });
+  const pProp = makePicker($("#rp-prop"), { multi: true, a: $("#f-date"), base: () => curEv()?.start });
   $("#propose").addEventListener("toggle", () => { if ($("#propose").open && !$("#f-date").value) pProp.reset(); });
-  // boutons segmentés (Soir / Midi) : mettent à jour un champ caché, ou le réglage d'ajout du calendrier
+  // boutons segmentés (matin / après-midi / soir) : mettent à jour un champ caché, ou le réglage d'ajout du calendrier
   document.addEventListener("click", e => {
     const b = e.target.closest(".seg[data-target] button[data-v]"); if (!b) return;
     const seg = b.closest(".seg"), t = seg.dataset.target;
@@ -1475,14 +1493,14 @@ button.cd .c + .n{margin-top:0}
     if (end < start) { msg.textContent = "La date de fin doit être après la date de début."; return; }
     const days = [];
     for (let d = parseD(start); iso(d) <= end; d.setDate(d.getDate()+1)) { const w = d.getDay(); if (!week || (w > 0 && w < 6)) days.push(iso(d)); }
-    const slots = [...($("#e-am").checked ? ["am"] : []), ...($("#e-pm").checked ? ["pm"] : [])];
-    if (!slots.length) { msg.textContent = "Cochez au moins un créneau (midi ou soir)."; return; }
+    const slots = ORDER.filter(x => $({ am: "#e-am", mid: "#e-mid", pm: "#e-pm" }[x]).checked);
+    if (!slots.length) { msg.textContent = "Cochez au moins un créneau (matin, après-midi ou soir)."; return; }
     if (days.length * slots.length > 45) { msg.textContent = `Cette période compte ${days.length * slots.length} créneaux : réduisez-la (45 au maximum).`; return; }
     $("#e-submit").disabled = true;
     try {
       const id = `ev-${start.slice(0,7)}-${Math.random().toString(36).slice(2,6)}`;
-      const evDoc = { title, start, end, createdAt: Date.now(), createdBy: S.me, closed: false, chosen: null };
-      const dDocs = days.flatMap(day => slots.map(sl => [`dates/${id}_${day}${sl === "am" ? "_am" : ""}`, { eventId: id, date: day, slot: sl, note: "", at: Date.now() }]));
+      const evDoc = { title, start, end, slots, createdAt: Date.now(), createdBy: S.me, closed: false, chosen: null };
+      const dDocs = days.flatMap(day => slots.map(sl => [`dates/${id}_${day}${sfx(sl)}`, { eventId: id, date: day, slot: sl, note: "", at: Date.now() }]));
       if (db.batch) await db.batch([["events/" + id, evDoc], ...dDocs]); // version GitHub : un seul enregistrement
       else { await db.doc("events/" + id).set(evDoc); await Promise.all(dDocs.map(([p, d]) => db.doc(p).set(d))); }
       $("#newev").open = false; prefillNew(); openDrawer(false);
