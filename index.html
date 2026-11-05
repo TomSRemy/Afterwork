@@ -278,7 +278,7 @@ button{font:inherit;cursor:pointer;border-radius:0.5333rem;border:1px solid tran
 .actas label{font-weight:600;color:var(--muted)}
 .actas #newpbox{display:inline-flex;gap:0.4rem;flex:1 1 14.6667rem}
 .actas #newpbox[hidden]{display:none}
-.actnote{background:var(--maybe-soft);color:var(--ink);border-radius:0.5333rem;padding:0.4rem 0.6667rem;font-size:.85rem;font-weight:600}
+.actnote{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;background:var(--maybe-soft);color:var(--ink);border-radius:0.5333rem;padding:0.4rem 0.6667rem;font-size:.85rem;font-weight:600}
 .side > .ideas{margin-top:0.6667rem}
 .wrap > .history, .wrap > .admin{margin-top:1.2rem}
 /* mise en page « site » : bandeau pleine largeur, deux colonnes sur grand écran */
@@ -582,6 +582,43 @@ input[type=date]::-webkit-calendar-picker-indicator:hover{opacity:1;background:v
 .pick .pc{font-size:.75rem;color:var(--muted)}
 .pick:has(input:checked){border-color:var(--accent);background:var(--accent-soft);box-shadow:0 0 0 2px var(--accent-soft)}
 .pick:has(input:focus-visible){outline:2px solid var(--pop);outline-offset:2px}
+
+/* ---- sélecteur de dates maison ---- */
+.rp{flex-basis:100%;border:1px solid var(--line);border-radius:var(--r);background:var(--surface);padding:.6rem;max-width:20rem}
+.rhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:.4rem}
+.rhead strong{font-family:var(--display);font-size:.9rem;color:var(--head);text-transform:capitalize}
+.rnav{background:none;border:1px solid var(--line);border-radius:999px;width:1.9rem;height:1.9rem;color:var(--ink);font-size:1.1rem;line-height:1;padding:0}
+.rnav:hover{border-color:var(--accent);color:var(--accent)}
+.rgrid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:2px}
+.rh{font-size:.66rem;font-weight:700;color:var(--muted);text-align:center;padding:.15rem 0}
+.rd{aspect-ratio:1/1;border:none;background:none;border-radius:.5rem;color:var(--ink);font-weight:600;font-size:.82rem;padding:0;font-variant-numeric:tabular-nums}
+.rd.we{color:var(--muted)}
+.rd:hover:not(:disabled){background:var(--accent-soft)}
+.rd:disabled{opacity:.3;cursor:default}
+.rd.in{background:var(--accent-soft);border-radius:0}
+.rd.st,.rd.en,.rd.st:hover,.rd.en:hover{background:var(--accent);color:var(--accent-ink)}
+.rsum{margin-top:.4rem;font-size:.8rem;color:var(--muted);font-weight:600}
+#proposeform .rp{max-width:20rem}
+/* ---- boutons segmentés ---- */
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:999px;overflow:hidden;background:var(--surface)}
+.seg button{background:none;border:none;border-radius:0;padding:.3rem .85rem;font-weight:600;font-size:.82rem;color:var(--muted)}
+.seg button[aria-pressed=true]{background:var(--accent);color:var(--accent-ink)}
+.caltool .addslot{display:inline-flex;align-items:center;gap:.45rem}
+/* ---- flamme sur le jour en tête dans le calendrier ---- */
+button.cd .fl{position:absolute;right:4px;bottom:6px;font-size:.75rem;line-height:1}
+button.cd .c + .n{margin-top:0}
+/* ---- liste déroulante des heures ---- */
+.closedbar{overflow:visible}
+.recap{border-radius:var(--r) var(--r) 0 0;overflow:hidden}
+.dd{position:relative}
+.dd .ddl{color:var(--muted);font-weight:600}
+.ddb{background:none;border:none;padding:0 1rem 0 0;font:inherit;font-weight:700;color:var(--ink);position:relative}
+.ddb::after{content:"";position:absolute;right:.15rem;top:50%;width:.4rem;height:.4rem;border-right:2px solid currentColor;border-bottom:2px solid currentColor;transform:translateY(-70%) rotate(45deg)}
+.ddm{position:absolute;bottom:calc(100% + .4rem);left:0;z-index:30;display:flex;flex-direction:column;min-width:7rem;max-height:14rem;overflow-y:auto;padding:.3rem;background:var(--surface);border:1px solid var(--line);border-radius:.8rem;box-shadow:0 .6rem 1.6rem rgba(0,0,0,.18)}
+.ddm[hidden]{display:none}
+.ddo{background:none;border:none;border-radius:.5rem;padding:.4rem .7rem;text-align:left;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+.ddo:hover{background:var(--accent-soft)}
+.ddo.on{background:var(--accent);color:var(--accent-ink)}
 </style>
 
 <div class="wrap">
@@ -662,8 +699,10 @@ input[type=date]::-webkit-calendar-picker-indicator:hover{opacity:1;background:v
   <details class="propose poll" id="propose" hidden>
     <summary>Proposer une autre date</summary>
     <form id="proposeform" class="row">
-      <input type="date" id="f-date" required aria-label="Date">
-      <select id="f-slot" class="csel" aria-label="Créneau"><option value="pm">Soir</option><option value="am">Midi</option></select>
+      <input type="hidden" id="f-date">
+      <div class="rp" id="rp-prop" aria-label="Date à proposer"></div>
+      <input type="hidden" id="f-slot" value="pm">
+      <span class="seg" data-target="f-slot" aria-label="Créneau"><button type="button" data-v="pm" aria-pressed="true">Soir</button><button type="button" data-v="am" aria-pressed="false">Midi</button></span>
       <input type="text" id="f-note" maxlength="200" placeholder="Commentaire (facultatif)" aria-label="Commentaire">
       <button class="btn" type="submit" id="f-submit">Ajouter</button>
     </form>
@@ -692,8 +731,8 @@ input[type=date]::-webkit-calendar-picker-indicator:hover{opacity:1;background:v
           <div class="f grow"><label for="e-title">Nom</label><input type="text" id="e-title" maxlength="60" required></div>
         </div>
         <div class="row">
-          <div class="f"><label for="e-start">Du</label><input type="date" id="e-start" required></div>
-          <div class="f"><label for="e-end">Au</label><input type="date" id="e-end" required></div>
+          <input type="hidden" id="e-start"><input type="hidden" id="e-end">
+          <div class="rp" id="rp-new" aria-label="Période du sondage"></div>
           <div class="chk"><input type="checkbox" id="e-week" checked><label for="e-week">Jours de semaine uniquement</label></div>
         </div>
         <div class="row slots"><span class="lbl">Créneaux</span>
@@ -767,7 +806,7 @@ input[type=date]::-webkit-calendar-picker-indicator:hover{opacity:1;background:v
   }
   document.getElementById("evselect").addEventListener("change", e => { if (e.target.value) location.hash = e.target.value; });
   addEventListener("hashchange", () => {
-    pickEvent(); ui.open.clear(); ui.sel.clear(); ui.calExtra = 0;
+    pickEvent(); ui.open.clear(); ui.sel.clear(); ui.calExtra = 0; $("#f-date").value = ""; pProp.reset();
     ui.confirmClose = !!ui.pendingClose && ui.pendingClose === S.cur; const keep = ui.confirmClose; ui.pendingClose = null;
     render(); if (!keep) scrollTo({ top: 0, behavior: reduce ? "auto" : "smooth" });
   });
@@ -852,7 +891,9 @@ input[type=date]::-webkit-calendar-picker-indicator:hover{opacity:1;background:v
     $("#newpbox").hidden = !ui.newP;
     const note = $("#actnote");
     note.hidden = !ui.actAs;
-    note.textContent = ui.actAs ? `Vous modifiez les réponses de ${nameOf(ui.actAs)}.` : "";
+    note.innerHTML = !ui.actAs ? "" : ui.confirmDelP
+      ? `Supprimer ${esc(nameOf(ui.actAs))} et toutes ses réponses ? <button type="button" class="ghost danger" data-p="del">Oui, supprimer</button> <button type="button" class="ghost" data-p="cancel">Annuler</button>`
+      : `Vous modifiez les réponses de ${esc(nameOf(ui.actAs))}. <button type="button" class="ghost danger" data-p="ask">Supprimer ce participant</button>`;
     const voters = S.cur ? participants(S.cur).map(nameOf) : [];
     $("#whovoted").textContent = voters.length ? `Ont répondu (${voters.length}) : ${voters.join(", ")}` : "Personne n'a encore répondu.";
   }
@@ -887,6 +928,13 @@ input[type=date]::-webkit-calendar-picker-indicator:hover{opacity:1;background:v
 
   // --- invitation Outlook pour la date retenue ---
   // heures proposées toutes les 30 min (liste déroulante au lieu du sélecteur d'heure natif)
+  function ddTime(field, label, cur){
+    const list = []; for (let h = 7; h <= 23; h++) for (const m of [0, 30]) list.push(`${String(h).padStart(2,"0")}:${m ? "30" : "00"}`);
+    if (cur && !list.includes(cur)) { list.push(cur); list.sort(); }
+    return `<span class="dd" data-field="${field}"><span class="ddl">${label}</span><button type="button" class="ddb" aria-haspopup="listbox" aria-expanded="false">${cur.replace(":", "h")}</button><span class="ddm" role="listbox" hidden>${list.map(t => `<button type="button" class="ddo${t === cur ? " on" : ""}" data-v="${t}" role="option" aria-selected="${t === cur}">${t.replace(":", "h")}</button>`).join("")}</span></span>`;
+  }
+  const closeDD = () => document.querySelectorAll(".ddm").forEach(m => { m.hidden = true; m.parentElement.querySelector(".ddb")?.setAttribute("aria-expanded", "false"); });
+  document.addEventListener("click", e => { if (!e.target.closest(".dd")) closeDD(); });
   function timeOpts(cur){
     const list = []; for (let h = 7; h <= 23; h++) for (const m of [0, 30]) list.push(`${String(h).padStart(2,"0")}:${m ? "30" : "00"}`);
     if (cur && !list.includes(cur)) list.push(cur), list.sort();
@@ -943,12 +991,17 @@ input[type=date]::-webkit-calendar-picker-indicator:hover{opacity:1;background:v
         <a class="btn" href="${esc(url)}" target="_blank" rel="noopener">${mgr(ev) ? "Créer l'invitation Outlook" : "Ajouter à mon agenda Outlook"}</a>
         ${window.awSetup ? `<button class="btn" type="button" data-act="ics">Télécharger l'invitation Outlook</button>` : ""}
         ${mgr(ev) ? `<button class="btn" type="button" data-act="copymails">Copier les adresses (${going.length})</button>
-        <label>Début <select id="evtime" class="tsel">${timeOpts(time)}</select></label>
-        <label>Fin <select id="evtimeend" class="tsel">${timeOpts(timeEnd)}</select></label>` : ""}
+        ${ddTime("time", "Début", time)}
+        ${ddTime("timeEnd", "Fin", timeEnd)}` : ""}
       </div>
       <span class="ok" id="invite-ok"></span>` : ""}`;
   }
   $("#closedbar").addEventListener("click", async e => {
+    const ddb = e.target.closest(".ddb");
+    if (ddb) { const m = ddb.parentElement.querySelector(".ddm"), open = m.hidden; closeDD(); m.hidden = !open; ddb.setAttribute("aria-expanded", String(open)); const on = m.querySelector(".on"); if (open && on) m.scrollTop = on.offsetTop - m.clientHeight / 2; return; }
+    const ddo = e.target.closest(".ddo");
+    if (ddo) { const field = ddo.closest(".dd").dataset.field, v = ddo.dataset.v; closeDD(); ddo.blur(); document.activeElement?.blur?.();
+      try { await db.doc("events/" + S.cur).update({ [field]: v }); } catch { setStatus("L'heure n'a pas pu être enregistrée.", true); } return; }
     if (e.target.closest("button[data-act=ics]")) {
       const a = document.createElement("a");
       a.href = URL.createObjectURL(new Blob([ui.ics], { type: "text/calendar" }));
@@ -994,13 +1047,15 @@ input[type=date]::-webkit-calendar-picker-indicator:hover{opacity:1;background:v
     const last = new Date(lastD.getFullYear(), lastD.getMonth() + (ui.calExtra || 0), 1);
     const mine = S.votes[W()]?.answers || {};
     const can = canAct(), hasAm = ds.some(d => slotOf(d) === "am");
+    let leadId = null, best = 0;
+    if (!ev.closed) for (const d of ds) { if (d.date < today) continue; const t = tally(d.id), sc = t.yes.length * 2 + t.maybe.length; if (t.yes.length && sc > best) { best = sc; leadId = d.id; } }
     let html = "";
     if (can) {
       const n = ui.sel.size;
       html += `<div class="caltool">${n ? `<span class="cnt">${n} créneau${n>1?"x":""}</span>
         <button class="ivote" data-cact="yes">🙌 Je viens</button><button class="ivote" data-cact="maybe">🤔 Peut-être</button><button class="ivote" data-cact="no">🙅 Pas dispo</button><button class="ghost" data-cact="clear">Effacer</button><button class="ghost" data-cact="none">Désélectionner</button>`
-        : `<span class="hint">Glissez pour sélectionner plusieurs dates · un jour vide (+) s'ajoute au sondage</span><button class="ghost" data-cact="all">Tout sélectionner</button>`}
-        <label class="addslot">Ajouts en <select id="addslot" class="csel"><option value="pm"${ui.addSlot !== "am" ? " selected" : ""}>Soir</option><option value="am"${ui.addSlot === "am" ? " selected" : ""}>Midi</option></select></label></div>`;
+        : `<span class="hint">Glissez pour sélectionner plusieurs dates · cliquez un jour vide (+) pour l'ajouter</span><button class="ghost" data-cact="all">Tout sélectionner</button>`}
+        <span class="addslot">Jours ajoutés en <span class="seg" data-target="__addslot"><button type="button" data-v="pm" aria-pressed="${ui.addSlot !== "am"}">Soir</button><button type="button" data-v="am" aria-pressed="${ui.addSlot === "am"}">Midi</button></span></span></div>`;
     }
     for (let m = new Date(first.getFullYear(), first.getMonth(), 1); m <= last; m = new Date(m.getFullYear(), m.getMonth() + 1, 1)) {
       const days = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate(), lead = (m.getDay() + 6) % 7;
@@ -1017,7 +1072,7 @@ input[type=date]::-webkit-calendar-picker-indicator:hover{opacity:1;background:v
         const y = Math.max(...ids.map(id => tally(id).yes.length));
         const on = ids.every(id => ui.sel.has(id));
         cells += `<button type="button" class="cd" data-ids="${ids.join(",")}" data-wd="${dd.getDay()}" data-a="${a}" aria-pressed="${on}" ${!can || past ? "disabled" : ""} aria-label="${esc(lbl)}, ${y} dispo">
-          ${y ? `<span class="c">${y}</span>` : ""}<span class="n">${i}</span><span class="m">${a === "mix" ? "…" : (EMO[a] || "")}</span>${hasAm ? `<span class="sl">${arr.map(d => SLOT[slotOf(d)][0]).join("·")}</span>` : ""}</button>`;
+          ${y ? `<span class="c">${y}</span>` : ""}<span class="n">${i}</span><span class="m">${a === "mix" ? "…" : (EMO[a] || "")}</span>${ids.includes(leadId) ? `<span class="fl" title="En tête">🔥</span>` : ""}${hasAm ? `<span class="sl">${arr.map(d => SLOT[slotOf(d)][0]).join("·")}</span>` : ""}</button>`;
       }
       html += `<div class="mon"><h3>${m.toLocaleDateString("fr-FR",{month:"long",year:"numeric"})}</h3><div class="grid">${cells}</div></div>`;
     }
@@ -1251,8 +1306,19 @@ input[type=date]::-webkit-calendar-picker-indicator:hover{opacity:1;background:v
   });
   $("#actsel").addEventListener("change", e => {
     const v = e.target.value;
-    ui.newP = v === "__new"; ui.actAs = ui.newP ? null : (v || null);
+    ui.newP = v === "__new"; ui.actAs = ui.newP ? null : (v || null); ui.confirmDelP = false;
     render(); if (ui.newP) $("#newp").focus();
+  });
+  $("#actnote").addEventListener("click", async e => {
+    const b = e.target.closest("button[data-p]"); if (!b || !S.admin || !ui.actAs) return;
+    if (b.dataset.p === "ask") { ui.confirmDelP = true; renderName(); return; }
+    if (b.dataset.p === "cancel") { ui.confirmDelP = false; renderName(); return; }
+    const id = ui.actAs; ui.confirmDelP = false; ui.actAs = null;
+    try {
+      if (db.batch) await db.batch([["votes/" + id, null], ["emails/" + id, null]]);
+      else await db.doc("votes/" + id).delete();
+      delete S.votes[id]; render();
+    } catch (err) { setStatus("Le participant n'a pas pu être supprimé" + (err?.message ? ` (${err.message})` : "") + ".", true); }
   });
   $("#newpok").addEventListener("click", () => {
     const n = $("#newp").value.trim().replace(/\s+/g, " ");
@@ -1299,12 +1365,12 @@ input[type=date]::-webkit-calendar-picker-indicator:hover{opacity:1;background:v
     const date = $("#f-date").value, note = $("#f-note").value.trim(), msg = $("#f-msg");
     msg.textContent = "";
     if (!ready()) { needName(); return; }
-    if (!date) { msg.textContent = "Choisissez une date."; return; }
+    if (!date) { msg.textContent = "Choisissez une date dans le calendrier."; return; }
     if (date < todayISO()) { msg.textContent = "Cette date est déjà passée. Choisissez une date à venir."; return; }
     const slot = $("#f-slot").value === "am" ? "am" : "pm";
     if (curDates().some(d => d.date === date && slotOf(d) === slot)) { msg.textContent = "Cette date est déjà dans la liste : votez directement dessus."; return; }
     $("#f-submit").disabled = true;
-    try { await db.collection("dates").add({ eventId: S.cur, date, slot, note, by: S.me, at: Date.now() }); $("#f-date").value = ""; $("#f-note").value = ""; }
+    try { await db.collection("dates").add({ eventId: S.cur, date, slot, note, by: S.me, at: Date.now() }); $("#f-date").value = ""; $("#f-note").value = ""; pProp.draw(); }
     catch (err) { msg.textContent = err?.code === "quota_exceeded" ? "Le sondage est plein : supprimez d'anciennes dates." : "La date n'a pas pu être ajoutée. Réessayez."; }
     finally { $("#f-submit").disabled = false; }
   });
@@ -1340,11 +1406,59 @@ input[type=date]::-webkit-calendar-picker-indicator:hover{opacity:1;background:v
 
   // --- organisateur : nouveau sondage, clôture ---
   const MONTHS = ["janvier","février","mars","avril","mai","juin","juillet","août","septembre","octobre","novembre","décembre"];
+  // --- sélecteur de dates maison (remplace le calendrier natif du navigateur) ---
+  function makePicker(box, { range, a, b, onPick, base }){
+    const st = { month: null };
+    const get = () => ({ s: a.value, e: range ? b.value : "" });
+    const fmt = k => parseD(k).toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short" });
+    function draw(){
+      const { s, e } = get(), today = todayISO();
+      if (!st.month) { const b0 = base && base(); const start = parseD(s || (b0 && b0 > today ? b0 : today)); st.month = new Date(start.getFullYear(), start.getMonth(), 1); }
+      const m = st.month, n = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate(), lead = (m.getDay() + 6) % 7;
+      let cells = ["L","M","M","J","V","S","D"].map(x => `<span class="rh">${x}</span>`).join("") + "<span></span>".repeat(lead);
+      for (let i = 1; i <= n; i++) {
+        const dd = new Date(m.getFullYear(), m.getMonth(), i), k = iso(dd), c = ["rd"];
+        if (k === s) c.push("st"); if (range && k === e) c.push("en"); if (range && s && e && k > s && k < e) c.push("in");
+        if (dd.getDay() === 0 || dd.getDay() === 6) c.push("we");
+        cells += `<button type="button" class="${c.join(" ")}" data-k="${k}"${k < today ? " disabled" : ""}>${i}</button>`;
+      }
+      const sum = range ? (s ? (e ? `Du ${fmt(s)} au ${fmt(e)}` : `Du ${fmt(s)} · choisissez le dernier jour`) : "Choisissez le premier jour") : (s ? fmt(s) : "Choisissez un jour");
+      box.innerHTML = `<div class="rhead"><button type="button" class="rnav" data-nav="-1" aria-label="Mois précédent">‹</button><strong>${m.toLocaleDateString("fr-FR", { month: "long", year: "numeric" })}</strong><button type="button" class="rnav" data-nav="1" aria-label="Mois suivant">›</button></div><div class="rgrid">${cells}</div><div class="rsum">${esc(sum)}</div>`;
+    }
+    box.addEventListener("click", ev => {
+      const nav = ev.target.closest("[data-nav]");
+      if (nav) { st.month = new Date(st.month.getFullYear(), st.month.getMonth() + Number(nav.dataset.nav), 1); draw(); return; }
+      const d = ev.target.closest("button.rd:not(:disabled)"); if (!d) return;
+      const k = d.dataset.k, { s, e } = get();
+      if (!range) a.value = k;
+      else if (!s || e || k < s) { a.value = k; b.value = ""; }
+      else b.value = k;
+      if (onPick) onPick();
+      draw();
+    });
+    draw();
+    return { draw, reset: () => { st.month = null; draw(); } };
+  }
+  const pNew = makePicker($("#rp-new"), { range: true, a: $("#e-start"), b: $("#e-end"), onPick: () => {
+    const v = $("#e-start").value; if (!v) return;
+    if (/^Afterwork d(e |')/.test($("#e-title").value) || !$("#e-title").value) { const mo = MONTHS[parseD(v).getMonth()]; $("#e-title").value = `Afterwork ${/^[aeiou]/.test(mo) ? "d'" : "de "}${mo}`; }
+  } });
+  const pProp = makePicker($("#rp-prop"), { range: false, a: $("#f-date"), base: () => curEv()?.start });
+  $("#propose").addEventListener("toggle", () => { if ($("#propose").open && !$("#f-date").value) pProp.reset(); });
+  // boutons segmentés (Soir / Midi) : mettent à jour un champ caché, ou le réglage d'ajout du calendrier
+  document.addEventListener("click", e => {
+    const b = e.target.closest(".seg[data-target] button[data-v]"); if (!b) return;
+    const seg = b.closest(".seg"), t = seg.dataset.target;
+    seg.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+    if (t === "__addslot") ui.addSlot = b.dataset.v; else { const inp = document.getElementById(t); if (inp) inp.value = b.dataset.v; }
+  });
+
   function prefillNew(){
     const t = new Date(), y = t.getMonth() === 11 ? t.getFullYear()+1 : t.getFullYear(), m = (t.getMonth()+1) % 12;
     const a = new Date(y, m, 1), b = new Date(y, m+1, 0);
     $("#e-start").value = iso(a); $("#e-end").value = iso(b);
     $("#e-title").value = `Afterwork de ${MONTHS[m]}`;
+    pNew.reset();
   }
   $("#e-start").addEventListener("change", () => {
     const v = $("#e-start").value; if (!v) return;
