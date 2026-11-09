@@ -9,11 +9,11 @@
 <style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 <script>
 /* Afterworks Selfee — version GitHub Pages.
-   Les votes sont stockés dans un « blob » JSON sur jsonblob.com ou textdb.dev (gratuit, sans compte).
+   Les votes sont stockés dans un « blob » JSON sur textdb.dev (gratuit, sans compte). Les anciens espaces jsonblob.com restent lisibles.
    Les adresses e-mail y sont CHIFFRÉES : seul l'organisateur (clé de son lien organisateur) peut les lire.
    Ce petit module imite l'API utilisée par la page (db + user), pour que le reste du code reste identique. */
 (() => {
-  // Deux services gratuits sans compte : jsonblob.com (prioritaire) et textdb.dev (secours).
+  // textdb.dev (gratuit, sans compte). jsonblob.com n'accepte plus les écritures depuis un navigateur : lecture seule, pour déplacer les anciens espaces.
   const BE = {
     jb: {
       get: id => fetch("https://jsonblob.com/api/jsonBlob/" + id, { headers: { Accept: "application/json" }, cache: "no-store" }),
@@ -132,12 +132,18 @@
   };
   const notify = () => { for (const c in listeners) for (const fn of listeners[c]) { try { fn(snapOf(c)); } catch (e) { console.error(e); } } refreshDec(); };
 
+  // numéro d'ordre : une relecture partie AVANT la dernière donnée connue (relecture plus récente ou notre propre écriture)
+  // est ignorée, pour ne jamais réafficher un état périmé quand les réponses du réseau arrivent dans le désordre
+  let seq = 0, applied = 0;
   async function pull(){
+    const my = ++seq;
     const r = await BE[KIND].get(BID);
     if (!r.ok) throw new Error("load " + r.status);
     const t = await r.text();
     let parsed; try { parsed = JSON.parse(t); } catch { parsed = null; }
     if (!parsed || typeof parsed !== "object" || !("adminHash" in parsed)) throw new Error("données introuvables");
+    if (my < applied) return false;
+    applied = my;
     if (t !== raw) { raw = t; data = Object.assign(EMPTY(), parsed); if (KEY) store("aw-backup-" + BLOB, t); return true; }
     return false;
   }
@@ -179,13 +185,14 @@
     const body = JSON.stringify(data);
     const r = await BE[KIND].put(BID, body);
     if (!r.ok) throw { code: "unavailable", message: "enregistrement impossible (" + r.status + ")" };
-    raw = body;
+    raw = body; applied = ++seq;
   }
   function write(mutate){
     const job = chain.catch(() => {}).then(async () => {
+      let changes = [];
       for (let attempt = 0; attempt < 6; attempt++) {
         await pull();
-        const changes = applyMutation(mutate);
+        changes = applyMutation(mutate);
         if (!changes.length) { notify(); return; }
         await putData();
         notify();
@@ -194,7 +201,8 @@
         if (changes.every(held)) { recent.push({ mutate, changes, t: Date.now() }); notify(); return; }
         console.debug("[afterworks] écriture écrasée, nouvel essai", attempt + 1);
       }
-      throw { code: "unavailable", message: "trop de modifications simultanées, réessayez" };
+      // très forte affluence : on ne lâche pas, la modification reste suivie et sera ré-appliquée aux prochains rafraîchissements
+      recent.push({ mutate, changes, t: Date.now() });
     });
     chain = job;
     return job;
@@ -287,7 +295,7 @@
   }
   ready.catch(() => {});
   // rafraîchit toutes les 8 s pour voir les votes des autres
-  if (BLOB) setInterval(() => { if (document.visibilityState === "visible") pull().then(ch => { if (ch) { notify(); recheck(); } }).catch(() => {}); }, 6000);
+  if (BLOB) setInterval(() => { if (document.visibilityState === "visible") pull().then(ch => { if (ch) notify(); recheck(); }).catch(() => {}); }, 6000);
 
   window.claude = { use: async n => {
     if (!BLOB) return null;
@@ -319,7 +327,7 @@
       const body = Object.assign(EMPTY(), { adminHash: await sha(key) }, await genKeys(key));
       const json = JSON.stringify(body);
       let id = null, errs = [];
-      for (const k of ["jb", "td"]) {
+      for (const k of ["td"]) {
         try { id = k + "." + await BE[k].create(json); break; } catch (e) { errs.push(k + " : " + e.message); }
       }
       if (!id) throw new Error(errs.join(" ; "));
@@ -330,6 +338,25 @@
       btn.disabled = false;
     }
   }
+  // ancien espace jsonblob (plus modifiable) : l'organisateur le déplace sur textdb en un clic
+  if (BLOB && KIND === "jb") document.addEventListener("DOMContentLoaded", () => {
+    ready.then(() => {
+      const box = document.createElement("div");
+      box.className = "setup";
+      box.innerHTML = isAdmin
+        ? `<h2 class="sec">Espace à déplacer</h2><p>Le service qui héberge cet espace n'accepte plus les votes. Déplacez-le : tout est conservé, puis partagez le nouveau lien.</p><button class="btn" id="aw-move">Déplacer l'espace</button><p class="msg" id="aw-mmsg"></p>`
+        : `<h2 class="sec">Lien périmé</h2><p>Cet espace a été déplacé ou n'accepte plus les votes. Demandez le nouveau lien à l'organisateur.</p>`;
+      document.querySelector("header.site").after(box);
+      box.querySelector("#aw-move")?.addEventListener("click", async e => {
+        e.currentTarget.disabled = true;
+        try {
+          const id = "td." + await BE.td.create(raw);
+          store("aw-key-" + id, KEY);
+          location.href = location.pathname + "?s=" + id + "&k=" + KEY;
+        } catch (err) { box.querySelector("#aw-mmsg").textContent = "Déplacement impossible pour l'instant (" + err.message + "). Réessayez."; e.currentTarget.disabled = false; }
+      });
+    }).catch(() => {});
+  });
   if (BLOB) document.addEventListener("DOMContentLoaded", () => {
     ready.then(() => {
       if (!isAdmin) return;
@@ -1774,6 +1801,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
   }
 
   // empreinte de l'e-mail (non réversible en pratique) : reconnaît la même personne sur un autre appareil
+  const localMails = {}; // e-mail en cours d'enregistrement : reste affiché même si une relecture plus ancienne arrive
   const mailHash = async m => { const h = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("aw:" + (window.awSetup?.BLOB || "") + ":" + m.trim().toLowerCase())); return [...new Uint8Array(h)].slice(0, 12).map(b => b.toString(16).padStart(2, "0")).join(""); };
   $("#nameform").addEventListener("submit", async e => {
     e.preventDefault();
@@ -1784,7 +1812,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     // déjà venu avec cet e-mail depuis un autre appareil ? on reprend la même fiche (pas de doublon)
     const twin = window.awSetup && Object.entries(S.votes).find(([id, v]) => id !== S.me && v?.mh === mh);
     if (twin && window.awSetup.adopt) { $("#name-msg").textContent = ""; $("#status").textContent = `Bon retour ${twin[1].name || ""} ! Vos réponses sont rechargées…`; window.awSetup.adopt(twin[0], mail); return; }
-    if (mail !== myMail()) { S.mails[S.me] = mail; db.doc("emails/" + S.me).set({ email: mail }).catch(() => setStatus("Votre e-mail n'a pas pu être enregistré. Réessayez.", true)); }
+    if (mail !== myMail()) { S.mails[S.me] = mail; localMails[S.me] = { m: mail, t: Date.now() }; db.doc("emails/" + S.me).set({ email: mail }).catch(() => setStatus("Votre e-mail n'a pas pu être enregistré. Réessayez.", true)); }
     S.votes[S.me] = { ...(S.votes[S.me] || { answers: {} }), name: n, mh };
     ui.editingName = false; $("#name-msg").textContent = ""; $("#namebar").classList.remove("need");
     render(); saveMine();
@@ -2054,7 +2082,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     };
     const fail = () => { clearTimeout(timer); setStatus("Impossible de charger les sondages pour le moment.", true); };
 
-    db.collection("emails").onSnapshot(s => { S.mails = Object.fromEntries(s.docs.map(d => [d.id, d.data().email]).filter(([,m]) => typeof m === "string")); done("emails", s); }, fail);
+    db.collection("emails").onSnapshot(s => { S.mails = Object.fromEntries(s.docs.map(d => [d.id, d.data().email]).filter(([,m]) => typeof m === "string")); for (const [id, l] of Object.entries(localMails)) { if (S.mails[id] === l.m || Date.now() - l.t > 60000) delete localMails[id]; else S.mails[id] = l.m; } done("emails", s); }, fail);
     db.collection("groups").onSnapshot(s => { S.groups = s.docs.map(d => ({ id: d.id, ...d.data() })).filter(g => typeof g.name === "string"); done("groups", s); }, fail);
     db.collection("events").onSnapshot(s => { S.events = s.docs.map(d => ({ id: d.id, ...d.data() })); done("events", s); }, fail);
     db.collection("dates").onSnapshot(s => { S.dates = s.docs.map(d => ({ id: d.id, ...d.data() })).filter(d => typeof d.date === "string"); done("dates", s); }, fail);
