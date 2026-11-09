@@ -587,6 +587,15 @@ button.cd:disabled{cursor:default;opacity:.55}
 .bub:nth-child(3n+2){border-color:rgba(225,180,39,.7);background:rgba(225,180,39,.15)}
 .cal .w{font-size:.74rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;opacity:.8}
 .cal .d{font-family:var(--display);font-weight:800;font-size:1.15rem}
+.cal{position:relative}
+.cal .okb{position:absolute;top:-6px;right:-6px;width:18px;height:18px;border-radius:50%;background:var(--yes);color:var(--surface);font-size:11px;font-weight:900;line-height:1;display:grid;place-items:center;border:2px solid var(--surface);box-shadow:0 1px 4px rgba(0,0,0,.25)}
+.cal .okb.new{animation:okpop .35s cubic-bezier(.3,1.6,.5,1)}
+.right{position:relative}
+.saved{position:absolute;right:calc(100% + .6rem);top:50%;transform:translateY(-50%);white-space:nowrap;background:color-mix(in srgb,var(--yes) 18%,var(--surface));color:var(--yes);border:1px solid color-mix(in srgb,var(--yes) 45%,transparent);font-weight:700;font-size:.8rem;padding:.25rem .7rem;border-radius:999px;animation:savedin 2.2s ease forwards;pointer-events:none}
+@keyframes okpop{from{transform:scale(0)}to{transform:scale(1)}}
+@keyframes savedin{0%{opacity:0;transform:translate(8px,-50%) scale(.9)}12%{opacity:1;transform:translate(0,-50%) scale(1.05)}20%{transform:translate(0,-50%) scale(1)}80%{opacity:1}100%{opacity:0}}
+@media (max-width:640px){.saved{right:0;top:auto;bottom:calc(100% + .35rem);transform:none;animation-name:savedinm}@keyframes savedinm{0%{opacity:0;transform:translateY(4px)}12%{opacity:1;transform:none}80%{opacity:1}100%{opacity:0}}}
+@media (prefers-reduced-motion:reduce){.saved,.cal .okb{animation:none}}
 .cal .yr{font-size:.62rem;font-weight:700;opacity:.75}
 .cal .mo{font-size:.68rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;opacity:.85;margin-top:1px}
 .monthhead{padding:.55rem .8rem .45rem;font-family:var(--display);font-weight:800;font-size:.95rem;color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--surface));border-top:1px solid var(--line)}
@@ -1753,7 +1762,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
       const voting = canAct() && !past;
       return `<div class="item${lead?" lead":""}${chosen?" chosen":""}${past || (closed && !chosen) ?" past":""}">
         <div class="r">
-          <div class="cal" data-wd="${dt.getDay()}" aria-hidden="true"><div class="w">${dt.toLocaleDateString("fr-FR",{weekday:"short"}).replace(".","")}</div><div class="d">${dt.getDate()}</div><div class="mo">${dt.toLocaleDateString("fr-FR",{month:"short"}).replace(".","")}</div>${ui.sort !== "date" && multiYear ? `<div class="yr">${dt.getFullYear()}</div>` : ""}</div>
+          <div class="cal" data-wd="${dt.getDay()}" aria-hidden="true"><div class="w">${dt.toLocaleDateString("fr-FR",{weekday:"short"}).replace(".","")}</div><div class="d">${dt.getDate()}</div><div class="mo">${dt.toLocaleDateString("fr-FR",{month:"short"}).replace(".","")}</div>${ui.sort !== "date" && multiYear ? `<div class="yr">${dt.getFullYear()}</div>` : ""}${mine && !pendingVotes[W()] ? `<span class="okb${ui.flash?.id === d.id ? " new" : ""}" title="Réponse enregistrée">✓</span>` : ""}</div>
           <div class="mid">
             <div class="line1"><span style="position:absolute;left:-9999px">${esc(label)}</span>${hasAm ? `<span class="slot ${slotOf(d)}">${SLOT[slotOf(d)]}</span>` : ""}
               <span class="counts"><span class="y"><b>${t.yes.length}</b> dispo</span><span class="m"><b>${t.maybe.length}</b> ?</span><span class="n"><b>${t.no.length}</b> non</span></span>
@@ -1764,6 +1773,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
             ${d.note ? `<div class="note">${esc(d.note)}</div>` : ""}
           </div>
           <div class="right">
+            ${ui.flash?.id === d.id && Date.now() < ui.flash.until ? `<span class="saved" role="status">${mine === "yes" ? "C'est noté ! 🎉" : mine === "maybe" ? "C'est noté 👌" : "C'est noté ✓"}</span>` : ""}
             ${voting ? `<div class="votes" role="group" aria-label="Votre réponse pour ${esc(label)}">
               <button class="vote" data-act="vote" data-id="${d.id}" data-v="yes" aria-pressed="${mine==="yes"}" title="Dispo !" aria-label="Dispo !">🙌</button>
               <button class="vote" data-act="vote" data-id="${d.id}" data-v="maybe" aria-pressed="${mine==="maybe"}" title="Peut-être" aria-label="Peut-être">🤔</button>
@@ -1798,10 +1808,17 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
   function saveMine(){
     const w = W(), doc = { name: S.votes[w]?.name || "", ...(S.votes[w]?.mh ? { mh: S.votes[w].mh } : {}), answers: { ...(S.votes[w]?.answers || {}) }, likes: { ...(S.votes[w]?.likes || {}) } };
     localVotes[w] = doc; pendingVotes[w] = (pendingVotes[w] || 0) + 1;
-    chain = chain.then(() => db.doc("votes/" + w).set(doc))
+    let ok = false;
+    chain = chain.then(() => db.doc("votes/" + w).set(doc)).then(() => { ok = true; })
       .catch(e => { setStatus("Votre réponse n'a pas pu être enregistrée. Réessayez.", true); console.warn(e); })
-      .finally(() => { if (--pendingVotes[w] === 0) setTimeout(() => { if (!pendingVotes[w]) delete localVotes[w]; }, 60000); });
+      .finally(() => { const last = pendingVotes[w] === 1; if (--pendingVotes[w] === 0) setTimeout(() => { if (!pendingVotes[w]) delete localVotes[w]; }, 60000); if (last) savedFlash(ok); });
     return chain;
+  }
+  // confirmation (pas de bouton « Valider ») : « C'est noté ! » à droite de la ligne votée, puis la pastille ✓ sur la date
+  let lastVoteId = null, flashT = 0;
+  function savedFlash(ok){
+    if (ok && lastVoteId) { ui.flash = { id: lastVoteId, until: Date.now() + 2200 }; clearTimeout(flashT); flashT = setTimeout(() => { ui.flash = null; render(); }, 2300); }
+    lastVoteId = null; render();
   }
   function needName(){
     if (!$("#drawer").hidden) openDrawer(false);
@@ -1829,6 +1846,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     if (answers[dateId] === v) delete answers[dateId]; else { answers[dateId] = v; if (v === "yes") confetti(el); }
     const live = new Set(S.dates.map(d => d.id));
     for (const k of Object.keys(answers)) if (!live.has(k)) delete answers[k];
+    lastVoteId = answers[dateId] ? dateId : null;
     S.votes[W()] = { ...(S.votes[W()] || {}), answers }; render(); saveMine();
   }
 
