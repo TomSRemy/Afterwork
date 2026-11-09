@@ -1376,7 +1376,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     if (can) {
       const n = ui.sel.size;
       html += `<div class="caltool">${n ? `<span class="cnt">${n} créneau${n>1?"x":""}</span>
-        <button class="ivote" data-cact="yes">🙌 Dispo !</button><button class="ivote" data-cact="maybe">🤔 Peut-être</button><button class="ivote" data-cact="no">🙅 Pas dispo</button><button class="ghost" data-cact="clear">Effacer</button><button class="ghost" data-cact="none">Désélectionner</button>`
+        <button class="ivote" data-cact="yes">🙌 Dispo !</button><button class="ivote" data-cact="maybe">🤔 Peut-être</button><button class="ivote" data-cact="no">🙅 Pas dispo</button><button class="ghost" data-cact="clear">Effacer</button><button class="ghost" data-cact="none">Désélectionner</button>${(() => { const k = calDeletable().length; if (!k) return ""; return ui.confirmCalDel ? `<span class="cnt">Supprimer ${k} date${k>1?"s":""} ? Les réponses dessus seront perdues.</span><button class="ghost danger" data-cact="delyes">Oui, supprimer</button><button class="ghost" data-cact="delno">Annuler</button>` : `<button class="ghost" data-cact="delask">Supprimer ${k>1 ? `les ${k} dates` : "la date"}</button>`; })()}`
         : `<span class="hint">Glissez pour sélectionner plusieurs dates · cliquez un jour vide (+) pour l'ajouter</span><button class="ghost" data-cact="all">Tout sélectionner</button>`}
         ${allowedSlots(ev).length > 1 ? `<span class="addslot">Jours ajoutés en ${segHTML("__addslot", curAddSlot(ev), allowedSlots(ev))}</span>` : ""}</div>`;
     }
@@ -1401,6 +1401,11 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     }
     if (can) html += `<button class="ghost" data-cact="more">Afficher le mois suivant</button>`;
     setHTML(box, html);
+  }
+  // dates sélectionnées que je peux supprimer : les miennes, ou toutes si je gère ce sondage (créateur / organisateur)
+  function calDeletable(){
+    const ev = curEv();
+    return S.dates.filter(d => ui.sel.has(d.id) && (d.by === S.me || S.owner || mgr(ev)));
   }
   async function addDates(days, slot, note = ""){
     const ev = curEv(); if (!ev || !canAct()) return;
@@ -1438,13 +1443,13 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
   addEventListener("pointerup", () => {
     if (!drag) return;
     const d = drag; drag = null;
-    if (d.mode === "sel") { for (const c of d.cells) for (const id of c.dataset.ids.split(",")) d.on ? ui.sel.add(id) : ui.sel.delete(id); renderCal(); return; }
+    if (d.mode === "sel") { ui.confirmCalDel = false; for (const c of d.cells) for (const id of c.dataset.ids.split(",")) d.on ? ui.sel.add(id) : ui.sel.delete(id); renderCal(); return; }
     if (!ready()) { renderCal(); needName(); return; }
     addDates([...d.cells].map(c => c.dataset.add), curAddSlot(curEv()));
   });
   addEventListener("pointercancel", () => { if (drag) { drag = null; renderCal(); } });
   $("#calv").addEventListener("change", e => { if (e.target.id === "addslot") ui.addSlot = e.target.value; });
-  $("#calv").addEventListener("click", e => {
+  $("#calv").addEventListener("click", async e => {
     const cell = e.target.closest("button.cd");
     if (cell) {
       if (e.detail !== 0) return; // la souris et le doigt passent par pointerdown/pointerup ; ici : clavier
@@ -1456,8 +1461,20 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     const act = b.dataset.cact;
     if (act === "more") { ui.calExtra = (ui.calExtra || 0) + 1; renderCal(); return; }
     if (act === "all") { curDates().filter(d => d.date >= todayISO()).forEach(d => ui.sel.add(d.id)); renderCal(); return; }
-    if (act === "none") { ui.sel.clear(); renderCal(); return; }
+    if (act === "none") { ui.sel.clear(); ui.confirmCalDel = false; renderCal(); return; }
+    if (act === "delask") { ui.confirmCalDel = true; renderCal(); return; }
+    if (act === "delno") { ui.confirmCalDel = false; renderCal(); return; }
     if (!canAct()) return;
+    if (act === "delyes") {
+      const del = calDeletable(); ui.confirmCalDel = false;
+      try {
+        if (db.batch) await db.batch(del.map(d => ["dates/" + d.id, null]));
+        else await Promise.all(del.map(d => db.doc("dates/" + d.id).delete()));
+        const gone = new Set(del.map(d => d.id));
+        S.dates = S.dates.filter(d => !gone.has(d.id)); gone.forEach(id => ui.sel.delete(id)); render();
+      } catch (err) { setStatus("La suppression n'a pas pu être enregistrée" + (err?.message ? ` (${err.message})` : "") + ".", true); renderCal(); }
+      return;
+    }
     if (!ready()) { needName(); return; }
     const answers = { ...(S.votes[W()]?.answers || {}) };
     for (const id of ui.sel) { if (act === "clear") delete answers[id]; else answers[id] = act; }
