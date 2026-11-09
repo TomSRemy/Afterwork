@@ -9,7 +9,8 @@
 <style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 <script>
 /* Afterworks Selfee — version GitHub Pages.
-   Les votes sont stockés dans un « blob » JSON public sur jsonblob.com (gratuit, sans compte).
+   Les votes sont stockés dans un « blob » JSON sur jsonblob.com ou textdb.dev (gratuit, sans compte).
+   Les adresses e-mail y sont CHIFFRÉES : seul l'organisateur (clé de son lien organisateur) peut les lire.
    Ce petit module imite l'API utilisée par la page (db + user), pour que le reste du code reste identique. */
 (() => {
   // Deux services gratuits sans compte : jsonblob.com (prioritaire) et textdb.dev (secours).
@@ -45,6 +46,70 @@
   const BID = BLOB ? BLOB.replace(/^(td|jb)\./, "") : null;
   const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
   const rid = () => (crypto.randomUUID ? crypto.randomUUID().replace(/-/g, "") : Math.random().toString(36).slice(2) + Date.now().toString(36)).slice(0, 20);
+  // ---- chiffrement des e-mails (WebCrypto) ----
+  // Paire de clés RSA-OAEP créée avec l'espace : la clé publique (dans les données) sert à chiffrer,
+  // la clé privée est rangée chiffrée par AES-GCM avec la clé du lien organisateur : lui seul peut déchiffrer.
+  const b64 = buf => { const u = new Uint8Array(buf); let s = ""; for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s); };
+  const unb64 = s => Uint8Array.from(atob(s), ch => ch.charCodeAt(0));
+  const RSA = { name: "RSA-OAEP", hash: "SHA-256" };
+  const aesKey = async k => crypto.subtle.importKey("raw", await crypto.subtle.digest("SHA-256", new TextEncoder().encode("aw-priv:" + k)), "AES-GCM", false, ["encrypt", "decrypt"]);
+  async function genKeys(k){
+    const kp = await crypto.subtle.generateKey({ ...RSA, modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]) }, true, ["encrypt", "decrypt"]);
+    const spki = await crypto.subtle.exportKey("spki", kp.publicKey), pk = await crypto.subtle.exportKey("pkcs8", kp.privateKey);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await aesKey(k), pk);
+    return { pubKey: b64(spki), privEnc: b64(iv) + "." + b64(ct) };
+  }
+  let PUB = null, PUBSRC = "", PRIV = null;
+  async function getPub(){
+    if (!data?.pubKey) return null;
+    if (PUBSRC !== data.pubKey) { PUB = await crypto.subtle.importKey("spki", unb64(data.pubKey), RSA, false, ["encrypt"]); PUBSRC = data.pubKey; }
+    return PUB;
+  }
+  async function loadPriv(){
+    if (!data?.privEnc || !KEY) return null;
+    const [iv, ct] = data.privEnc.split(".");
+    const pk = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(iv) }, await aesKey(KEY), unb64(ct));
+    return crypto.subtle.importKey("pkcs8", pk, RSA, false, ["decrypt"]);
+  }
+  const encStr = async s => b64(await crypto.subtle.encrypt({ name: "RSA-OAEP" }, await getPub(), new TextEncoder().encode(s)));
+  const clear = new Map(); // texte chiffré -> adresse en clair (organisateur uniquement, en mémoire)
+  const encMember = async m => (m && m.email && data?.pubKey) ? { name: m.name || "", enc: await encStr(m.email) } : m;
+  // avant écriture : remplace les adresses en clair par leur version chiffrée
+  async function encDoc(c, id, d){
+    if (!d || !data?.pubKey) return d;
+    const x = JSON.parse(JSON.stringify(d));
+    if (c === "emails" && typeof x.email === "string") {
+      if (id === uid) store("aw-mail-" + BLOB, x.email);
+      clear.set(x.enc = await encStr(x.email), x.email); delete x.email;
+    }
+    if (c === "groups" && Array.isArray(x.members)) x.members = await Promise.all(x.members.map(encMember));
+    if (c === "events" && Array.isArray(x.guests)) x.guests = await Promise.all(x.guests.map(encMember));
+    for (const m of [...(x.members || []), ...(x.guests || [])]) if (m && m.enc && !clear.has(m.enc)) { const src = [...(d.members || []), ...(d.guests || [])].find(o => o && o.name === m.name && o.email); if (src) clear.set(m.enc, src.email); }
+    return x;
+  }
+  // à la lecture : remet les adresses en clair quand on sait les déchiffrer (organisateur), sinon les laisse vides
+  const decMember = m => (m && m.enc) ? { ...m, email: clear.get(m.enc) || null } : m;
+  function decDoc(c, id, d){
+    if (!d) return d;
+    if (c === "emails" && d.enc) return { ...d, email: clear.get(d.enc) || (id === uid ? store("aw-mail-" + BLOB) : null) || undefined };
+    if (c === "groups" && Array.isArray(d.members)) return { ...d, members: d.members.map(decMember) };
+    if (c === "events" && Array.isArray(d.guests)) return { ...d, guests: d.guests.map(decMember) };
+    return d;
+  }
+  let decBusy = false;
+  async function refreshDec(){
+    if (!PRIV || decBusy || !data) return;
+    const todo = new Set();
+    for (const d of Object.values(data.emails || {})) if (d?.enc && !clear.has(d.enc)) todo.add(d.enc);
+    for (const g of Object.values(data.groups || {})) for (const m of g?.members || []) if (m?.enc && !clear.has(m.enc)) todo.add(m.enc);
+    for (const e of Object.values(data.events || {})) for (const m of e?.guests || []) if (m?.enc && !clear.has(m.enc)) todo.add(m.enc);
+    if (!todo.size) return;
+    decBusy = true;
+    await Promise.all([...todo].map(async t => { try { clear.set(t, new TextDecoder().decode(await crypto.subtle.decrypt({ name: "RSA-OAEP" }, PRIV, unb64(t)))); } catch { clear.set(t, ""); } }));
+    decBusy = false;
+    notify();
+  }
   const sha = async s => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)))].map(b => b.toString(16).padStart(2, "0")).join("");
 
   // identité = ce navigateur
@@ -62,31 +127,88 @@
   const listeners = {}; // collection -> Set(fn)
 
   const snapOf = c => {
-    const docs = Object.entries((data && data[c]) || {}).map(([id, d]) => ({ id, exists: true, data: () => d }));
+    const docs = Object.entries((data && data[c]) || {}).map(([id, d]) => ({ id, exists: true, data: () => decDoc(c, id, d) }));
     return { docs, size: docs.length, empty: !docs.length, docChanges: () => [], metadata: { fromCache: false, hasPendingWrites: false } };
   };
-  const notify = () => { for (const c in listeners) for (const fn of listeners[c]) { try { fn(snapOf(c)); } catch (e) { console.error(e); } } };
+  const notify = () => { for (const c in listeners) for (const fn of listeners[c]) { try { fn(snapOf(c)); } catch (e) { console.error(e); } } refreshDec(); };
 
   async function pull(){
     const r = await BE[KIND].get(BID);
     if (!r.ok) throw new Error("load " + r.status);
     const t = await r.text();
-    if (t !== raw) { raw = t; data = Object.assign(EMPTY(), JSON.parse(t)); return true; }
+    let parsed; try { parsed = JSON.parse(t); } catch { parsed = null; }
+    if (!parsed || typeof parsed !== "object" || !("adminHash" in parsed)) throw new Error("données introuvables");
+    if (t !== raw) { raw = t; data = Object.assign(EMPTY(), parsed); if (KEY) store("aw-backup-" + BLOB, t); return true; }
     return false;
   }
-  let chain = Promise.resolve();
+  // ---- écritures robustes aux modifications simultanées ----
+  // Le stockage gratuit ne sait pas refuser une écriture « périmée ». Donc chaque écriture :
+  // 1) relit la dernière version et y applique SA modification (jamais une copie ancienne) ;
+  // 2) marque chaque document modifié d'un tampon (_w) — et chaque suppression d'une pierre tombale ;
+  // 3) relit après un court délai pour vérifier que la modification est toujours là ;
+  //    si quelqu'un l'a écrasée en même temps, elle est ré-appliquée par-dessus (jusqu'à 6 fois) ;
+  // 4) les modifications récentes sont encore re-vérifiées pendant 2 minutes à chaque rafraîchissement.
+  let chain = Promise.resolve(), wseq = 0;
+  const recent = []; // { mutate, changes, t }
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const COLLS = ["events", "dates", "votes", "comments", "ideas", "emails", "groups"];
+  function applyMutation(mutate){
+    const before = JSON.parse(JSON.stringify(data));
+    mutate(data); // peut lever une erreur (droits) : elle remonte telle quelle
+    const stamp = Date.now() * 1000 + (++wseq % 1000), changes = [];
+    data._del ||= {};
+    for (const c of COLLS) {
+      const a = before[c] || {}, b = data[c] || {};
+      for (const id of new Set([...Object.keys(a), ...Object.keys(b)])) {
+        if (JSON.stringify(a[id]) === JSON.stringify(b[id])) continue;
+        if (b[id]) { b[id]._w = stamp; delete data._del[c + "/" + id]; changes.push({ c, id, stamp, del: false }); }
+        else { data._del[c + "/" + id] = stamp; changes.push({ c, id, stamp, del: true }); }
+      }
+    }
+    const old = Date.now() * 1000 - 7 * 864e8; // pierres tombales gardées 7 jours
+    for (const k of Object.keys(data._del)) if (data._del[k] < old) delete data._del[k];
+    return changes;
+  }
+  // une modification est « tenue » si le document porte notre tampon ou un plus récent (écriture légitime après nous)
+  const held = ({ c, id, stamp, del }) => {
+    const d = data?.[c]?.[id];
+    if (!del) { if (d) return (d._w || 0) >= stamp; const t = data?._del?.[c + "/" + id]; return !!t && t > stamp; } // supprimé APRÈS nous : on ne le ressuscite pas
+    return !d || (d._w || 0) > stamp;
+  };
+  async function putData(){
+    const body = JSON.stringify(data);
+    const r = await BE[KIND].put(BID, body);
+    if (!r.ok) throw { code: "unavailable", message: "enregistrement impossible (" + r.status + ")" };
+    raw = body;
+  }
   function write(mutate){
-    // relit la dernière version, applique la modification, renvoie le tout (limite les écrasements)
     const job = chain.catch(() => {}).then(async () => {
-      await pull();
-      mutate(data);
-      const body = JSON.stringify(data);
-      const r = await BE[KIND].put(BID, body);
-      if (!r.ok) throw { code: "unavailable", message: "save " + r.status };
-      raw = body; notify();
+      for (let attempt = 0; attempt < 6; attempt++) {
+        await pull();
+        const changes = applyMutation(mutate);
+        if (!changes.length) { notify(); return; }
+        await putData();
+        notify();
+        await sleep(350 + Math.random() * 450 + attempt * 300);
+        await pull();
+        if (changes.every(held)) { recent.push({ mutate, changes, t: Date.now() }); notify(); return; }
+        console.debug("[afterworks] écriture écrasée, nouvel essai", attempt + 1);
+      }
+      throw { code: "unavailable", message: "trop de modifications simultanées, réessayez" };
     });
     chain = job;
     return job;
+  }
+  // filet de sécurité : à chaque rafraîchissement, on vérifie que nos modifications des 2 dernières minutes sont toujours là
+  async function recheck(){
+    const now = Date.now();
+    for (let i = recent.length - 1; i >= 0; i--) if (now - recent[i].t > 120000) recent.splice(i, 1);
+    const lost = recent.filter(r => !r.changes.every(held));
+    if (!lost.length) return;
+    console.debug("[afterworks] modification perdue, ré-application", lost.length);
+    for (const r of lost) recent.splice(recent.indexOf(r), 1);
+    // ré-appliquées dans l'ordre où elles ont été faites, pour que la plus récente gagne
+    for (const r of lost) write(r.mutate).catch(() => {});
   }
   const split = p => { const i = p.lastIndexOf("/"); return [p.slice(0, i), p.slice(i + 1)]; };
   const docRef = path => {
@@ -107,15 +229,15 @@
     };
     return {
       id, path,
-      set: async d => { guard(); await write(s => { evGuard(s, d, "set"); (s[c] ||= {})[id] = JSON.parse(JSON.stringify(d)); }); },
+      set: async d0 => { guard(); const d = await encDoc(c, id, d0); await write(s => { evGuard(s, d, "set"); (s[c] ||= {})[id] = JSON.parse(JSON.stringify(d)); }); },
       _apply: (s, d) => {
         guard();
         if (d === null) { evGuard(s, {}, "delete"); if (s[c]) delete s[c][id]; return; }
         evGuard(s, d, "set"); (s[c] ||= {})[id] = JSON.parse(JSON.stringify(d));
       },
-      update: async d => { guard(); await write(s => { evGuard(s, d, "update"); const cur = (s[c] ||= {})[id]; if (!cur) throw { code: "invalid_argument", message: "absent" }; Object.assign(cur, JSON.parse(JSON.stringify(d))); }); },
+      update: async d0 => { guard(); const d = await encDoc(c, id, d0); await write(s => { evGuard(s, d, "update"); const cur = (s[c] ||= {})[id]; if (!cur) throw { code: "invalid_argument", message: "absent" }; Object.assign(cur, JSON.parse(JSON.stringify(d))); }); },
       delete: async () => { guard(); await write(s => { evGuard(s, {}, "delete"); if (s[c]) delete s[c][id]; }); },
-      get: async () => { const d = data?.[c]?.[id]; return { id, exists: !!d, data: () => d, metadata: { fromCache: false } }; },
+      get: async () => { const d = data?.[c]?.[id]; return { id, exists: !!d, data: () => decDoc(c, id, d), metadata: { fromCache: false } }; },
       onSnapshot: () => () => {},
     };
   };
@@ -132,7 +254,7 @@
     }),
     doc: docRef,
     // plusieurs documents en un seul enregistrement (création d'un sondage et de ses dates)
-    batch: list => write(s => { for (const [p, d] of list) docRef(p)._apply(s, d); }),
+    batch: async list0 => { const list = await Promise.all(list0.map(async ([p, d]) => { const [c, id] = split(p); return [p, await encDoc(c, id, d)]; })); return write(s => { for (const [p, d] of list) docRef(p)._apply(s, d); }); },
   };
   const user = {
     id: async () => uid,
@@ -142,10 +264,30 @@
     name: async () => "", email: async () => null,
   };
 
-  const ready = BLOB ? pull().then(async () => { isAdmin = !!KEY && !!data.adminHash && (await sha(KEY)) === data.adminHash; }) : Promise.reject(new Error("no blob"));
+  const ready = BLOB ? pull().then(async () => {
+    isAdmin = !!KEY && !!data.adminHash && (await sha(KEY)) === data.adminHash;
+    if (!isAdmin) return;
+    try {
+      if (!data.pubKey) { const k = await genKeys(KEY); await write(s => { if (!s.pubKey) { s.pubKey = k.pubKey; s.privEnc = k.privEnc; } }); }
+      PRIV = await loadPriv();
+      await migratePlain();
+    } catch (e) { console.warn("[afterworks] chiffrement indisponible", e); }
+  }) : Promise.reject(new Error("no blob"));
+  // anciens espaces : chiffre les adresses encore stockées en clair
+  async function migratePlain(){
+    await getPub(); if (!PUB) return;
+    const plain = [];
+    for (const [id, d] of Object.entries(data.emails || {})) if (typeof d?.email === "string") plain.push(["emails/" + id, { email: d.email }]);
+    for (const [id, g] of Object.entries(data.groups || {})) if ((g?.members || []).some(m => m?.email)) plain.push(["groups/" + id, { name: g.name, members: g.members, createdBy: g.createdBy }]);
+    for (const [id, e] of Object.entries(data.events || {})) if ((e?.guests || []).some(m => m?.email)) plain.push(["events/" + id, { guests: e.guests }]);
+    if (!plain.length) return;
+    const enc = await Promise.all(plain.map(async ([p, d]) => { const [c, id] = split(p); return [c, id, await encDoc(c, id, d)]; }));
+    await write(s => { for (const [c, id, d] of enc) { if (c === "emails") s.emails[id] = { ...d }; else Object.assign(s[c][id], d); } });
+    console.debug("[afterworks] adresses chiffrées :", plain.length);
+  }
   ready.catch(() => {});
   // rafraîchit toutes les 8 s pour voir les votes des autres
-  if (BLOB) setInterval(() => { if (document.visibilityState === "visible") pull().then(ch => ch && notify()).catch(() => {}); }, 8000);
+  if (BLOB) setInterval(() => { if (document.visibilityState === "visible") pull().then(ch => { if (ch) { notify(); recheck(); } }).catch(() => {}); }, 6000);
 
   window.claude = { use: async n => {
     if (!BLOB) return null;
@@ -154,12 +296,27 @@
   } };
 
   // --- premier lancement : créer l'espace de vote ---
-  window.awSetup = { BLOB, KEY, uid, isAdminP: ready.then(() => isAdmin, () => false), shareUrl: () => location.origin + location.pathname + "?s=" + BLOB };
+  // même personne sur un autre appareil : on reprend sa fiche (identifiant) et on recharge
+  function adopt(otherId, mail){
+    store("aw-uid", otherId); if (mail) store("aw-mail-" + BLOB, mail);
+    setTimeout(() => location.reload(), 600);
+  }
+  // sauvegarde / restauration (organisateur)
+  function backupText(){ return raw || store("aw-backup-" + BLOB) || ""; }
+  async function restoreText(t){
+    if (!isAdmin) throw new Error("organisateur uniquement");
+    const d = JSON.parse(t);
+    if (!d || d.adminHash !== data.adminHash) throw new Error("cette sauvegarde ne correspond pas à cet espace");
+    const r = await BE[KIND].put(BID, t);
+    if (!r.ok) throw new Error("enregistrement impossible (" + r.status + ")");
+    raw = ""; await pull(); notify();
+  }
+  window.awSetup = { BLOB, KEY, uid, adopt, isAdminP: ready.then(() => isAdmin, () => false), shareUrl: () => location.origin + location.pathname + "?s=" + BLOB };
   async function create(btn, msg){
     btn.disabled = true; msg.textContent = "Création…";
     try {
       const key = rid() + rid();
-      const body = Object.assign(EMPTY(), { adminHash: await sha(key) });
+      const body = Object.assign(EMPTY(), { adminHash: await sha(key) }, await genKeys(key));
       const json = JSON.stringify(body);
       let id = null, errs = [];
       for (const k of ["jb", "td"]) {
@@ -180,13 +337,54 @@
       box.className = "sharebox";
       const url = location.origin + location.pathname + "?s=" + BLOB;
       box.innerHTML = `<strong>Lien à partager</strong><input type="text" readonly id="aw-share" aria-label="Lien à partager"><button class="btn" type="button" id="aw-copy">Copier</button><span class="ok" id="aw-copied"></span>
-        <p class="hint">Ce navigateur est reconnu comme organisateur. Pour l'être aussi sur un autre ordinateur, <a href="#" id="aw-orglink">copiez votre lien organisateur</a> et gardez-le pour vous.</p>`;
+        <p class="hint">Ce navigateur est reconnu comme organisateur. Pour l'être aussi sur un autre ordinateur, <a href="#" id="aw-orglink">copiez votre lien organisateur</a> et gardez-le pour vous.</p>
+        <div class="safe"><span class="flabel">Sécurité</span>
+          <button class="ghost" type="button" id="aw-mailme">M'envoyer mon lien organisateur par e-mail</button>
+          <button class="ghost" type="button" id="aw-export">Télécharger une sauvegarde</button>
+          <label class="ghost" style="cursor:pointer">Restaurer une sauvegarde<input type="file" id="aw-import" accept=".json,application/json" hidden></label>
+        </div>`;
       document.getElementById("admin-ok").before(box);
       box.querySelector("#aw-share").value = url;
       const copy = async (t, el) => { try { await navigator.clipboard.writeText(t); el.textContent = "Copié !"; } catch { const i = box.querySelector("#aw-share"); i.value = t; i.select(); el.textContent = "Sélectionné : copiez-le (Ctrl+C)."; } };
       box.querySelector("#aw-copy").addEventListener("click", () => copy(url, box.querySelector("#aw-copied")));
       box.querySelector("#aw-orglink").addEventListener("click", e => { e.preventDefault(); copy(url + "&k=" + KEY, box.querySelector("#aw-copied")); });
+      const say = t => { box.querySelector("#aw-copied").textContent = t; };
+      box.querySelector("#aw-mailme").addEventListener("click", () => {
+        const me = store("aw-mail-" + BLOB) || "";
+        const a = document.createElement("a");
+        a.href = `mailto:${encodeURIComponent(me)}?subject=${encodeURIComponent("Afterworks : mon lien organisateur (à garder pour moi)")}&body=${encodeURIComponent("Mon lien organisateur Afterworks — ne pas partager :\n" + url + "&k=" + KEY + "\n\nLien à partager avec l'équipe :\n" + url)}`;
+        document.body.appendChild(a); a.click(); a.remove();
+        say("Votre messagerie s'ouvre : envoyez-vous ce mail et gardez-le.");
+      });
+      box.querySelector("#aw-export").addEventListener("click", () => {
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([backupText()], { type: "application/json" }));
+        a.download = "afterworks-sauvegarde-" + new Date().toISOString().slice(0, 10) + ".json";
+        document.body.appendChild(a); a.click(); a.remove();
+        say("Sauvegarde téléchargée (les e-mails y restent chiffrés).");
+      });
+      box.querySelector("#aw-import").addEventListener("change", async e => {
+        const f = e.target.files?.[0]; if (!f) return;
+        try { await restoreText(await f.text()); say("Sauvegarde restaurée."); }
+        catch (err) { say("Restauration impossible : " + err.message); }
+        e.target.value = "";
+      });
     }, () => {});
+  });
+  // données introuvables chez le service de stockage : l'organisateur peut remettre la dernière copie de son navigateur
+  if (BLOB) document.addEventListener("DOMContentLoaded", () => {
+    ready.catch(() => {
+      const copyTxt = store("aw-backup-" + BLOB);
+      if (!KEY || !copyTxt) return;
+      const box = document.createElement("div");
+      box.className = "setup";
+      box.innerHTML = `<h2 class="sec">Données introuvables</h2><p>Le service de stockage ne renvoie plus les données de cet espace. Votre navigateur en a gardé une copie.</p><button class="btn" id="aw-local">Restaurer la dernière copie</button><p class="msg" id="aw-lmsg"></p>`;
+      document.querySelector("header.site").after(box);
+      box.querySelector("#aw-local").addEventListener("click", async () => {
+        try { const r = await BE[KIND].put(BID, copyTxt); if (!r.ok) throw new Error(r.status); location.reload(); }
+        catch (e) { box.querySelector("#aw-lmsg").textContent = "Restauration impossible pour l'instant (" + e.message + "). Réessayez plus tard."; }
+      });
+    });
   });
   if (!BLOB) document.addEventListener("DOMContentLoaded", () => {
     const wrap = document.querySelector(".wrap");
@@ -675,6 +873,13 @@ button.cd .c + .n{margin-top:0}
 .hero > .mascot{position:absolute;z-index:1;top:50%;right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(50vw - 40rem)) + 1rem);height:7.5rem;width:auto;transform:translateY(-50%) rotate(-12deg);filter:drop-shadow(0 .3em .6em rgba(0,0,0,.3));pointer-events:none}
 header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(50vw - 40rem)) + 9rem)}
 @media (max-width:560px){.hero > .mascot{height:4.6rem;right:.6rem}header.site .hero{padding-right:5.6rem}}
+
+/* ---- modifier un sondage ---- */
+.evedit{display:flex;flex-direction:column;gap:.55rem;border:1px solid var(--accent);border-radius:var(--r);padding:.8rem;background:var(--surface)}
+.evedit .glabel{max-width:28rem}
+.eerow{display:flex;flex-wrap:wrap;align-items:center;gap:.6rem}
+.evedit .chk{display:inline-flex;align-items:center;gap:.3rem;font-size:.88rem}
+.evedit .hint{margin:0;font-size:.8rem;color:var(--muted)}
 </style>
 
 <div class="wrap">
@@ -742,7 +947,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
   <div class="mainc">
   <h2 class="sec poll c-quand">Quand&nbsp;?</h2>
   <div class="legend poll" aria-hidden="true">
-    <span>🙌 Je viens</span>
+    <span>🙌 Dispo !</span>
     <span>🤔 Peut-être</span>
     <span>🙅 Pas dispo</span>
   </div>
@@ -809,6 +1014,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
       </form>
     </details>
     <div class="actions closeacts" id="evactions"></div>
+    <div class="evedit" id="evedit" hidden></div>
     <div class="guestbox" id="guestbox" hidden></div>
     <p class="ok" id="admin-ok"></p>
   </section>
@@ -824,6 +1030,8 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
   try { if (localStorage.getItem("aw-view") === "cal") ui.view = "cal"; if (localStorage.getItem("aw-sort") === "votes") ui.sort = "votes"; } catch {}
   let db = null, user = null, profiles = {};
 
+  // ne remplace le contenu que s'il a changé : un clic en cours n'est jamais perdu pendant une synchronisation
+  const setHTML = (el, html) => { if (el.__html !== html) { el.innerHTML = html; el.__html = html; } };
   const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
   const parseD = iso => { const [y,m,d] = iso.split("-").map(Number); return new Date(y, m-1, d); };
   const iso = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
@@ -930,13 +1138,13 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     const ev = curEv();
     const can = S.admin || (!!ev && mgr(ev));
     box.hidden = !can;
-    renderGuests();
+    renderGuests(); renderEvEdit();
     if (!can) return;
     $("#evactions").innerHTML = !ev || !(S.admin || mgr(ev)) ? "" : (ev.closed
       ? (S.admin ? `<button class="ghost" data-act="reopen">Rouvrir « ${esc(ev.title)} »</button>` : "")
       : ui.confirmClose
         ? closeForm(ev)
-        : `<button class="btn bigbtn" data-act="askclose">🔒 Clôturer le sondage</button>` + (invitees(ev).length ? ` <button class="btn" data-act="mailgroup">✉ Envoyer l'invitation (${invitees(ev).length})</button>${window.awSetup ? ` <button class="btn deskonly" data-act="emlgroup">Ouvrir dans Outlook classique</button>` : ""}${groupStatus(ev).pending.length && groupStatus(ev).done.length ? ` <button class="ghost" data-act="mailpending">Relancer ceux qui n'ont pas répondu (${groupStatus(ev).pending.length})</button>` : ""}` : ""))
+        : `<button class="btn bigbtn" data-act="askclose">🔒 Clôturer le sondage</button> <button class="ghost" data-act="editev">✏️ Modifier le sondage</button>` + (invitees(ev).some(m => m.email) ? ` <button class="btn" data-act="mailgroup">✉ Envoyer l'invitation (${invitees(ev).filter(m => m.email).length})</button>${window.awSetup ? ` <button class="btn deskonly" data-act="emlgroup">Ouvrir dans Outlook classique</button>` : ""}${groupStatus(ev).pending.length && groupStatus(ev).done.length ? ` <button class="ghost" data-act="mailpending">Relancer ceux qui n'ont pas répondu (${groupStatus(ev).pending.length})</button>` : ""}` : ""))
       + (S.admin && !ui.confirmClose ? (ui.confirmDelEv
         ? ` <span>Supprimer « ${esc(ev.title)} » avec ses dates, votes sur ces dates et activités ? C'est définitif.</span> <button class="ghost danger" data-act="delev">Oui, supprimer</button><button class="ghost" data-act="canceldelev">Annuler</button>`
         : ` <button class="ghost" data-act="askdelev">Supprimer ce sondage</button>`) : "");
@@ -982,9 +1190,9 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     const likers = id => Object.entries(S.votes).filter(([,v]) => v?.likes?.[id]).map(([u]) => u);
     let ideas = curIdeas().map(i => ({ ...i, l: likers(i.id) })).sort((a,b) => (ev?.chosenIdea === b.id) - (ev?.chosenIdea === a.id) || b.l.length - a.l.length || (a.at||0) - (b.at||0));
     if (closed) ideas = ideas.slice(0, 1); // sondage terminé : seulement l'activité retenue (ou la plus votée)
-    if (!ideas.length) { box.innerHTML = ""; return; }
+    if (!ideas.length) { setHTML(box, ""); return; }
     const leadId = !ev?.chosenIdea && ideas[0].l.length ? ideas[0].id : null;
-    box.innerHTML = ideas.map(i => {
+    setHTML(box, ideas.map(i => {
       const mine = S.me && i.l.includes(W());
       const chosen = ev?.chosenIdea === i.id || (closed && !ev?.chosenIdea);
       const canDel = canAct() && (i.by === S.me || S.owner);
@@ -998,7 +1206,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
         </div>
         ${mgr(ev) && !closed ? `<div class="acts"><button class="ghost" data-act="chooseidea" data-iid="${i.id}">${ev?.chosenIdea === i.id ? "Annuler le choix" : "Retenir cette activité"}</button></div>` : ""}
       </div>`;
-    }).join("");
+    }).join(""));
   }
 
   // --- invitation Outlook pour la date retenue ---
@@ -1058,7 +1266,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     bar.innerHTML = `<div class="recap">
         <div class="col"><span class="k">Quand&nbsp;?</span><span class="v">${esc(whenTxt)}</span><span class="s">${esc(time.replace(":", "h"))} – ${esc(timeEnd.replace(":", "h"))}</span></div>
         <div class="col"><span class="k">Quoi&nbsp;?</span><span class="v">${act ? esc(act.text) : "À définir"}</span></div>
-        <div class="col"><span class="k">Qui&nbsp;?</span><span class="v">${n} personne${n>1?"s":""}</span>
+        <div class="col"><span class="k">Qui&nbsp;?</span><span class="v">${n ? `${n} personne${n>1?"s":""}` : "Personne pour l'instant"}</span>
           <ul class="ppl">${[...tt.yes.map(i => [i, "yes", "Dispo"]), ...tt.maybe.map(i => [i, "maybe", "Peut-être"]), ...tt.no.map(i => [i, "no", "Pas dispo"])].map(([i, c, l]) => `<li class="${c}"><span class="nm">${esc(nameOf(i))}</span><span class="st">${l}</span></li>`).join("")}</ul>
         </div>
       </div>
@@ -1123,7 +1331,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     box.hidden = !isCal; $("#list").hidden = isCal; $("#sortsw").hidden = isCal;
     $("#sortsw").querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.v === (ui.sort === "date" ? "date" : "votes"))));
     if (!isCal) return;
-    const ev = curEv(); if (!ev) { box.innerHTML = ""; return; }
+    const ev = curEv(); if (!ev) { setHTML(box, ""); return; }
     const ds = curDates(), today = todayISO();
     const byDate = {}; ds.forEach(d => (byDate[d.date] ||= []).push(d));
     Object.values(byDate).forEach(arr => arr.sort((x, y) => ORDER.indexOf(slotOf(x)) - ORDER.indexOf(slotOf(y))));
@@ -1141,7 +1349,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     if (can) {
       const n = ui.sel.size;
       html += `<div class="caltool">${n ? `<span class="cnt">${n} créneau${n>1?"x":""}</span>
-        <button class="ivote" data-cact="yes">🙌 Je viens</button><button class="ivote" data-cact="maybe">🤔 Peut-être</button><button class="ivote" data-cact="no">🙅 Pas dispo</button><button class="ghost" data-cact="clear">Effacer</button><button class="ghost" data-cact="none">Désélectionner</button>`
+        <button class="ivote" data-cact="yes">🙌 Dispo !</button><button class="ivote" data-cact="maybe">🤔 Peut-être</button><button class="ivote" data-cact="no">🙅 Pas dispo</button><button class="ghost" data-cact="clear">Effacer</button><button class="ghost" data-cact="none">Désélectionner</button>`
         : `<span class="hint">Glissez pour sélectionner plusieurs dates · cliquez un jour vide (+) pour l'ajouter</span><button class="ghost" data-cact="all">Tout sélectionner</button>`}
         ${allowedSlots(ev).length > 1 ? `<span class="addslot">Jours ajoutés en ${segHTML("__addslot", curAddSlot(ev), allowedSlots(ev))}</span>` : ""}</div>`;
     }
@@ -1165,7 +1373,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
       html += `<div class="mon"><h3>${m.toLocaleDateString("fr-FR",{month:"long",year:"numeric"})}</h3><div class="grid">${cells}</div></div>`;
     }
     if (can) html += `<button class="ghost" data-cact="more">Afficher le mois suivant</button>`;
-    box.innerHTML = html;
+    setHTML(box, html);
   }
   async function addDates(days, slot, note = ""){
     const ev = curEv(); if (!ev || !canAct()) return;
@@ -1275,6 +1483,34 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     for (const m of inv) ((m.email && mails.has(norm(m.email))) || (m.name && names.has(norm(m.name))) ? done : pending).push(m);
     return { done, pending };
   }
+  // modifier un sondage après coup : nom, créneaux proposés, groupe (les dates se gèrent dans le calendrier)
+  function renderEvEdit(){
+    const box = $("#evedit"), ev = curEv();
+    const show = !!ev && !ev.closed && mgr(ev) && ui.editEv;
+    box.hidden = !show;
+    if (!show || box.contains(document.activeElement)) return;
+    const al = allowedSlots(ev);
+    box.innerHTML = `<strong>Modifier « ${esc(ev.title)} »</strong>
+      <label class="glabel">Nom<input type="text" id="ee-title" maxlength="60" value="${esc(ev.title || "")}"></label>
+      <div class="eerow"><span class="flabel">Créneaux proposés</span>${ORDER.map(x => `<label class="chk"><input type="checkbox" data-ee-slot="${x}"${al.includes(x) ? " checked" : ""}> ${SLOT[x]}</label>`).join("")}</div>
+      ${S.groups.length ? `<div class="eerow"><span class="flabel">Groupe</span><div class="picks"><label class="pick"><input type="radio" name="ee-group" value=""${!ev.groupId ? " checked" : ""}><span class="pd">Aucun</span></label>${S.groups.map(g => `<label class="pick"><input type="radio" name="ee-group" value="${g.id}"${ev.groupId === g.id ? " checked" : ""}><span class="pd">${esc(g.name)}</span></label>`).join("")}</div></div>` : ""}
+      <p class="hint">Pour ajouter ou retirer des dates : vue « Calendrier » (cliquer un jour vide) ou 💬 → « Supprimer la date ».</p>
+      <p class="msg" id="ee-msg"></p>
+      <div class="actions"><button class="btn" type="button" data-ee="save">Enregistrer</button><button class="ghost" type="button" data-ee="cancel">Annuler</button></div>`;
+  }
+  $("#evedit").addEventListener("click", async e => {
+    const b = e.target.closest("button[data-ee]"); const ev = curEv(); if (!b || !ev || !mgr(ev)) return;
+    if (b.dataset.ee === "cancel") { ui.editEv = false; b.blur(); renderEvEdit(); return; }
+    const title = $("#ee-title").value.trim();
+    const slots = ORDER.filter(x => document.querySelector(`[data-ee-slot="${x}"]`)?.checked);
+    if (!title) { $("#ee-msg").textContent = "Donnez un nom au sondage."; return; }
+    if (!slots.length) { $("#ee-msg").textContent = "Gardez au moins un créneau."; return; }
+    const upd = { title, slots };
+    const gsel = document.querySelector('input[name="ee-group"]:checked'); if (gsel) upd.groupId = gsel.value || null;
+    b.disabled = true; b.textContent = "Enregistrement…";
+    try { await db.doc("events/" + ev.id).update(upd); ui.editEv = false; b.blur(); document.activeElement?.blur?.(); render(); }
+    catch (err) { $("#ee-msg").textContent = "La modification n'a pas pu être enregistrée" + (err?.message ? ` (${err.message})` : "") + "."; b.disabled = false; b.textContent = "Enregistrer"; }
+  });
   function renderGuests(){
     const box = $("#guestbox"), ev = curEv();
     const show = !!ev && !ev.closed && mgr(ev);
@@ -1284,7 +1520,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     box.innerHTML = `<div class="gtitle"><strong>Invités en plus${g ? ` du groupe « ${esc(g.name)} »` : ""}</strong><span>pour ce sondage uniquement</span></div>
       ${gs.length ? `<ul class="gchips">${gs.map((m, i) => `<li><span>${esc(m.name || m.email)}</span>${m.name ? `<span class="gm-mail">${esc(m.email)}</span>` : ""}<button type="button" class="x" data-gu="rm" data-i="${i}" aria-label="Retirer ${esc(m.name || m.email)}">×</button></li>`).join("")}</ul>` : ""}
       <div class="gadd"><input type="text" id="gu-name" placeholder="Prénom" maxlength="40" aria-label="Prénom de l'invité"><input type="email" id="gu-email" placeholder="E-mail" maxlength="120" aria-label="E-mail de l'invité"><button type="button" class="btn" data-gu="add">Ajouter</button></div>
-      <p class="msg" id="gu-msg"></p>`;
+      <p class="msg" id="gu-msg">${esc(ui.gumsg || "")}</p>`;
   }
   $("#guestbox").addEventListener("click", async e => {
     const b = e.target.closest("button[data-gu]"); const ev = curEv(); if (!b || !ev || !mgr(ev)) return;
@@ -1292,8 +1528,9 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     if (b.dataset.gu === "rm") gs.splice(Number(b.dataset.i), 1);
     else {
       const name = $("#gu-name").value.trim(), email = $("#gu-email").value.trim();
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { $("#gu-msg").textContent = "Entrez une adresse e-mail valide."; $("#gu-email").focus(); return; }
-      if (invitees(ev).some(m => norm(m.email) === norm(email))) { $("#gu-msg").textContent = "Cette personne est déjà invitée."; return; }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { $("#gu-msg").textContent = ui.gumsg = "Entrez une adresse e-mail valide."; $("#gu-email").focus(); return; }
+      if (invitees(ev).some(m => norm(m.email) === norm(email))) { $("#gu-msg").textContent = ui.gumsg = "Cette personne est déjà invitée."; return; }
+      ui.gumsg = "";
       gs.push({ name, email });
     }
     b.blur(); document.activeElement?.blur?.();
@@ -1351,7 +1588,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
         <label class="glabel">Nom du groupe<input type="text" class="gname-in" value="${esc(g.name)}" maxlength="50"></label>
         <ul class="gmem">${(g.members || []).map((m, i) => `<li><span>${esc(m.name || "—")}</span><span class="gm-mail">${esc(m.email || "")}</span><button type="button" class="x" data-g="rm" data-i="${i}" aria-label="Retirer ${esc(m.name || m.email)}">×</button></li>`).join("") || `<li class="dnone">Aucun membre pour l'instant.</li>`}</ul>
         <div class="gadd"><input type="text" class="gm-name" placeholder="Prénom" maxlength="40" aria-label="Prénom du membre"><input type="email" class="gm-email" placeholder="E-mail" maxlength="120" aria-label="E-mail du membre"><button type="button" class="btn" data-g="add">Ajouter</button></div>
-        <p class="msg gmsg"></p>
+        <p class="msg gmsg">${ui.gmsg?.gid === g.id ? esc(ui.gmsg.text) : ""}</p>
         <div class="gfoot">${ui.confirmDelG === g.id ? `Supprimer ce groupe ? <button type="button" class="ghost danger" data-g="del">Oui, supprimer</button><button type="button" class="ghost" data-g="nodel">Annuler</button>` : `<button type="button" class="ghost danger" data-g="askdel">Supprimer le groupe</button>`}<button type="button" class="ghost" data-g="close">Fermer</button></div>
       </div>`;
     }).join("") + (ui.newGroup
@@ -1381,8 +1618,10 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     if (act === "rm") { const members = (g.members || []).filter((_, i) => i !== Number(b.dataset.i)); document.activeElement?.blur?.(); await saveGroup({ ...g, members }); renderGroups(); return; }
     if (act === "add") {
       const name = wrap.querySelector(".gm-name").value.trim(), email = wrap.querySelector(".gm-email").value.trim(), msg = wrap.querySelector(".gmsg");
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { msg.textContent = "Entrez une adresse e-mail valide."; wrap.querySelector(".gm-email").focus(); return; }
-      if ((g.members || []).some(m => norm(m.email) === norm(email))) { msg.textContent = "Cette personne est déjà dans le groupe."; return; }
+      const say = t => { ui.gmsg = { gid: g.id, text: t }; msg.textContent = t; };
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { say("Entrez une adresse e-mail valide."); wrap.querySelector(".gm-email").focus(); return; }
+      if ((g.members || []).some(m => norm(m.email) === norm(email))) { say("Cette personne est déjà dans le groupe."); return; }
+      ui.gmsg = null;
       document.activeElement?.blur?.();
       await saveGroup({ ...g, members: [...(g.members || []), { name, email }] }); renderGroups();
       wrap.isConnected; $(".gedit .gm-name")?.focus();
@@ -1413,7 +1652,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     $(".wrap").classList.toggle("is-empty", !curEv());
     $("#emptycta").hidden = !(!curEv() && S.me && S.canWrite);
     if (!curEv()) {
-      list.innerHTML = `<div class="empty">${S.me && S.canWrite ? "Aucun sondage pour l'instant. Créez-en un depuis le menu « Sondages »." : "Aucun sondage en cours pour l'instant."}</div>`;
+      setHTML(list, `<div class="empty">${S.me && S.canWrite ? "Aucun sondage pour l'instant. Créez-en un depuis le menu « Sondages »." : "Aucun sondage en cours pour l'instant."}</div>`);
       return;
     }
     const today = todayISO(), ev = curEv(), closed = isClosed();
@@ -1424,7 +1663,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
       const pick = dates.find(d => d.id === ev.chosen) || [...dates].sort((a,b) => { const ta = tally(a.id), tb = tally(b.id); return (tb.yes.length*2+tb.maybe.length) - (ta.yes.length*2+ta.maybe.length); })[0];
       dates = [pick];
     }
-    if (!dates.length){ list.innerHTML = `<div class="empty">Aucune date pour ce sondage.</div>`; return; }
+    if (!dates.length){ setHTML(list, `<div class="empty">Aucune date pour ce sondage.</div>`); return; }
 
     const ids = new Set([...Object.keys(S.votes), ...S.comments.map(c => c.by)].filter(Boolean));
     if (user && ids.size) { const ps = await user.profiles([...ids]); if (seq !== renderSeq) return; profiles = ps; }
@@ -1440,7 +1679,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     let leadId = null, best = 0;
     for (const d of dates) { if (!closed && d.date < today) continue; const t = tallies[d.id]; const sc = t.yes.length*2 + t.maybe.length; if (t.yes.length && sc > best) { best = sc; leadId = d.id; } }
 
-    list.innerHTML = dates.map(d => {
+    setHTML(list, dates.map(d => {
       const t = tallies[d.id], total = t.yes.length + t.maybe.length + t.no.length;
       const pct = n => total ? (n/total*100).toFixed(1) : 0;
       const mine = S.me ? S.votes[W()]?.answers?.[d.id] : null;
@@ -1451,7 +1690,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
       const label = dt.toLocaleDateString("fr-FR", { weekday:"long", day:"numeric", month:"long" });
       const nm = arr => arr.map(id => esc(nameOf(id))).join(", ");
       const names = [t.yes.length ? `<span class="y">${nm(t.yes)}</span>` : "", t.maybe.length ? `<span class="m">${nm(t.maybe)} (peut-être)</span>` : ""].filter(Boolean).join(" · ");
-      const canDel = canAct() && (d.by === S.me || S.owner);
+      const canDel = canAct() && (d.by === S.me || S.owner || mgr(ev));
       const voting = canAct() && !past;
       return `<div class="item${lead?" lead":""}${chosen?" chosen":""}${past || (closed && !chosen) ?" past":""}">
         <div class="r">
@@ -1467,7 +1706,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
           </div>
           <div class="right">
             ${voting ? `<div class="votes" role="group" aria-label="Votre réponse pour ${esc(label)}">
-              <button class="vote" data-act="vote" data-id="${d.id}" data-v="yes" aria-pressed="${mine==="yes"}" title="Je viens" aria-label="Je viens">🙌</button>
+              <button class="vote" data-act="vote" data-id="${d.id}" data-v="yes" aria-pressed="${mine==="yes"}" title="Dispo !" aria-label="Dispo !">🙌</button>
               <button class="vote" data-act="vote" data-id="${d.id}" data-v="maybe" aria-pressed="${mine==="maybe"}" title="Peut-être" aria-label="Peut-être">🤔</button>
               <button class="vote" data-act="vote" data-id="${d.id}" data-v="no" aria-pressed="${mine==="no"}" title="Pas dispo" aria-label="Pas dispo">🙅</button>
             </div>` : ""}
@@ -1486,7 +1725,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
           </div>` : ""}
         </div>` : ""}
       </div>`;
-    }).join("");
+    }).join(""));
 
     renderCal();
     if (focusId){ const el = document.getElementById(focusId); if (el) el.focus(); }
@@ -1494,9 +1733,15 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
 
   // --- écritures : un document par personne, votes/<id> = {name, answers, likes} ---
   let chain = Promise.resolve();
+  // tant qu'un enregistrement est en cours, la version locale de la fiche prime sur celle reçue du serveur
+  // (sinon des clics rapides repartiraient d'une version qui n'a pas encore les réponses précédentes)
+  const localVotes = {}, pendingVotes = {};
   function saveMine(){
-    const w = W(), doc = { name: S.votes[w]?.name || "", answers: { ...(S.votes[w]?.answers || {}) }, likes: { ...(S.votes[w]?.likes || {}) } };
-    chain = chain.then(() => db.doc("votes/" + w).set(doc)).catch(e => { setStatus("Votre réponse n'a pas pu être enregistrée. Réessayez.", true); console.warn(e); });
+    const w = W(), doc = { name: S.votes[w]?.name || "", ...(S.votes[w]?.mh ? { mh: S.votes[w].mh } : {}), answers: { ...(S.votes[w]?.answers || {}) }, likes: { ...(S.votes[w]?.likes || {}) } };
+    localVotes[w] = doc; pendingVotes[w] = (pendingVotes[w] || 0) + 1;
+    chain = chain.then(() => db.doc("votes/" + w).set(doc))
+      .catch(e => { setStatus("Votre réponse n'a pas pu être enregistrée. Réessayez.", true); console.warn(e); })
+      .finally(() => { if (--pendingVotes[w] === 0) setTimeout(() => { if (!pendingVotes[w]) delete localVotes[w]; }, 60000); });
     return chain;
   }
   function needName(){
@@ -1528,13 +1773,19 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     S.votes[W()] = { ...(S.votes[W()] || {}), answers }; render(); saveMine();
   }
 
-  $("#nameform").addEventListener("submit", e => {
+  // empreinte de l'e-mail (non réversible en pratique) : reconnaît la même personne sur un autre appareil
+  const mailHash = async m => { const h = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("aw:" + (window.awSetup?.BLOB || "") + ":" + m.trim().toLowerCase())); return [...new Uint8Array(h)].slice(0, 12).map(b => b.toString(16).padStart(2, "0")).join(""); };
+  $("#nameform").addEventListener("submit", async e => {
     e.preventDefault();
     const n = $("#f-name").value.trim().replace(/\s+/g, " "), mail = $("#f-mail").value.trim();
     if (!n) { $("#name-msg").textContent = "Entrez votre prénom."; return; }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) { $("#name-msg").textContent = "Entrez une adresse e-mail valide pour recevoir l'invitation."; return; }
+    const mh = await mailHash(mail);
+    // déjà venu avec cet e-mail depuis un autre appareil ? on reprend la même fiche (pas de doublon)
+    const twin = window.awSetup && Object.entries(S.votes).find(([id, v]) => id !== S.me && v?.mh === mh);
+    if (twin && window.awSetup.adopt) { $("#name-msg").textContent = ""; $("#status").textContent = `Bon retour ${twin[1].name || ""} ! Vos réponses sont rechargées…`; window.awSetup.adopt(twin[0], mail); return; }
     if (mail !== myMail()) { S.mails[S.me] = mail; db.doc("emails/" + S.me).set({ email: mail }).catch(() => setStatus("Votre e-mail n'a pas pu être enregistré. Réessayez.", true)); }
-    S.votes[S.me] = { ...(S.votes[S.me] || { answers: {} }), name: n };
+    S.votes[S.me] = { ...(S.votes[S.me] || { answers: {} }), name: n, mh };
     ui.editingName = false; $("#name-msg").textContent = ""; $("#namebar").classList.remove("need");
     render(); saveMine();
   });
@@ -1571,13 +1822,31 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     if (!ready()) { needName(); return; }
     if (!text || !canAct()) return;
     if (curIdeas().some(i => i.text.toLowerCase() === text.toLowerCase())) { msg.textContent = "Cette activité est déjà proposée : votez pour elle !"; return; }
-    try { await db.collection("ideas").add({ eventId: S.cur, text, by: S.me, at: Date.now() }); $("#f-idea").value = ""; }
-    catch { msg.textContent = "L'activité n'a pas pu être ajoutée. Réessayez."; }
+    $("#f-idea").value = ""; // vidé tout de suite : on peut enchaîner une autre idée
+    try { await db.collection("ideas").add({ eventId: S.cur, text, by: S.me, at: Date.now() }); }
+    catch { msg.textContent = "L'activité n'a pas pu être ajoutée. Réessayez."; if (!$("#f-idea").value) $("#f-idea").value = text; }
   });
-  $("#idealist").addEventListener("click", async e => {
-    const b = e.target.closest("button[data-act]"); if (!b || !canAct()) return;
+  // les votes partent dès l'appui (pointerdown) : un rafraîchissement de la liste pendant le clic ne peut plus le perdre
+  $("#list").addEventListener("pointerdown", e => {
+    if (e.button > 0) return;
+    const b = e.target.closest('button[data-act="vote"]'); if (!b) return;
+    vote(b.dataset.id, b.dataset.v, b);
+  });
+  $("#idealist").addEventListener("pointerdown", e => {
+    if (e.button > 0) return;
+    const b = e.target.closest('button[data-act="like"]'); if (!b) return;
+    b.dispatchEvent(new CustomEvent("aw-like", { bubbles: true }));
+  });
+  $("#idealist").addEventListener("aw-like", e => handleIdea(e.target, "like"));
+  $("#idealist").addEventListener("click", e => {
+    const b = e.target.closest("button[data-act]"); if (!b) return;
+    if (b.dataset.act === "like" && e.detail !== 0) return; // déjà traité au pointerdown
+    handleIdea(b, b.dataset.act);
+  });
+  async function handleIdea(b, act){
+    if (!canAct()) return;
     const iid = b.dataset.iid;
-    if (b.dataset.act === "like") {
+    if (act === "like") {
       if (!ready()) { needName(); return; }
       const likes = { ...(S.votes[W()]?.likes || {}) };
       if (likes[iid]) delete likes[iid]; else { likes[iid] = true; confetti(b); }
@@ -1592,7 +1861,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     } else if (b.dataset.act === "chooseidea") {
       try { await db.doc("events/" + S.cur).update({ chosenIdea: curEv()?.chosenIdea === iid ? null : iid }); } catch { $("#idea-msg").textContent = "Seul le créateur du sondage ou l'organisateur peut retenir une activité."; }
     }
-  });
+  }
 
   $("#proposeform").addEventListener("submit", async e => {
     e.preventDefault();
@@ -1621,7 +1890,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
   $("#list").addEventListener("click", async e => {
     const b = e.target.closest("button[data-act]"); if (!b) return;
     const { act, id } = b.dataset;
-    if (act === "vote") vote(id, b.dataset.v, b);
+    if (act === "vote") { if (e.detail === 0) vote(id, b.dataset.v, b); return; } // souris/doigt : géré au pointerdown
     else if (act === "toggle") { ui.open.has(id) ? ui.open.delete(id) : ui.open.add(id); render(); }
     else if (act === "askdel") { ui.confirmDel = id; render(); }
     else if (act === "canceldel") { ui.confirmDel = null; render(); }
@@ -1713,7 +1982,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     const slots = ORDER.filter(x => $({ am: "#e-am", mid: "#e-mid", pm: "#e-pm" }[x]).checked);
     if (!slots.length) { msg.textContent = "Cochez au moins un créneau (matin, après-midi ou soir)."; return; }
     if (days.length * slots.length > 45) { msg.textContent = `Cette période compte ${days.length * slots.length} créneaux : réduisez-la (45 au maximum).`; return; }
-    $("#e-submit").disabled = true;
+    $("#e-submit").disabled = true; $("#e-submit").textContent = "Création…";
     try {
       const id = `ev-${start.slice(0,7)}-${Math.random().toString(36).slice(2,6)}`;
       const evDoc = { title, start, end, slots, groupId: document.querySelector('input[name="e-group"]:checked')?.value || null, createdAt: Date.now(), createdBy: S.me, closed: false, chosen: null };
@@ -1724,7 +1993,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
       $("#admin-ok").textContent = `« ${title} » est créé avec ${dDocs.length} date${dDocs.length>1?"s":""}.`;
       location.hash = id;
     } catch (err) { msg.textContent = err?.code === "invalid_argument" ? "Vous n'avez pas le droit de créer un sondage." : "Le sondage n'a pas pu être créé" + (err?.message ? ` (${err.message})` : "") + ". Réessayez."; console.warn(err); }
-    finally { $("#e-submit").disabled = false; }
+    finally { $("#e-submit").disabled = false; $("#e-submit").textContent = "Créer le sondage"; }
   });
   $("#evactions").addEventListener("change", e => {
     if (e.target.name === "close-date") ui.closeD = e.target.value;
@@ -1733,6 +2002,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
   $("#evactions").addEventListener("click", async e => {
     const b = e.target.closest("button[data-act]"); if (!b) return;
     const act = b.dataset.act;
+    if (act === "editev") { ui.editEv = true; renderEvEdit(); $("#ee-title")?.focus(); return; }
     if (act === "emlgroup") { const ev = curEv(); emlGroup(ev, invitees(ev), false); return; }
     if (act === "mailgroup" || act === "mailpending") { const ev = curEv(), st = groupStatus(ev); mailGroup(ev, act === "mailgroup" ? invitees(ev) : st.pending, act === "mailpending"); return; }
     if (act === "askdelev") { ui.confirmDelEv = true; renderAdmin(); return; }
@@ -1788,7 +2058,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     db.collection("groups").onSnapshot(s => { S.groups = s.docs.map(d => ({ id: d.id, ...d.data() })).filter(g => typeof g.name === "string"); done("groups", s); }, fail);
     db.collection("events").onSnapshot(s => { S.events = s.docs.map(d => ({ id: d.id, ...d.data() })); done("events", s); }, fail);
     db.collection("dates").onSnapshot(s => { S.dates = s.docs.map(d => ({ id: d.id, ...d.data() })).filter(d => typeof d.date === "string"); done("dates", s); }, fail);
-    db.collection("votes").onSnapshot(s => { S.votes = Object.fromEntries(s.docs.map(d => [d.id, d.data()])); done("votes", s); }, fail);
+    db.collection("votes").onSnapshot(s => { S.votes = Object.fromEntries(s.docs.map(d => [d.id, d.data()])); for (const [id, d] of Object.entries(localVotes)) S.votes[id] = d; done("votes", s); }, fail);
     db.collection("comments").onSnapshot(s => { S.comments = s.docs.map(d => ({ id: d.id, ...d.data() })); done("comments", s); }, fail);
     db.collection("ideas").onSnapshot(s => { S.ideas = s.docs.map(d => ({ id: d.id, ...d.data() })).filter(i => typeof i.text === "string"); done("ideas", s); }, fail);
   }
@@ -1813,6 +2083,8 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
 .sharebox .hint{flex-basis:100%;margin:0;font-size:.8rem;color:var(--muted)}
 .sharebox .hint a{color:var(--accent)}
 .closeacts:empty + .guestbox[hidden] + .sharebox{border-top:none;padding-top:0}
+.sharebox label.ghost{border:1px solid var(--line);border-radius:0.5333rem;font-weight:400;display:inline-flex;align-items:center;line-height:1.5}
+.sharebox .safe{flex-basis:100%;display:flex;flex-wrap:wrap;gap:.45rem;align-items:center;padding-top:.5rem;border-top:1px dashed var(--line)}
 .sharebox .ok{font-size:.8rem;color:var(--yes)}
 </style>
 </body>
