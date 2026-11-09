@@ -11,7 +11,7 @@
 
 - Personne n'a besoin de compte pour voter. Chaque navigateur est reconnu tout seul.
 - Tout le monde peut créer un sondage. Celui qui le crée peut retenir la date et l'activité, puis le clôturer. Seul l'organisateur peut rouvrir un sondage clôturé et modifier les réponses des autres. Pour être organisateur sur un autre ordinateur, utilisez « copier mon lien organisateur » et gardez ce lien privé.
-- Les votes sont enregistrés sur jsonblob.com, ou sur textdb.dev si jsonblob ne répond pas (services gratuits, sans compte).
+- Les votes sont enregistrés sur textdb.dev (service gratuit, sans compte). Un ancien espace créé sur jsonblob.com (qui n'accepte plus les écritures) affiche à l'organisateur un bouton « Déplacer l'espace » : tout est conservé, il suffit ensuite de repartager le nouveau lien.
 - Les adresses e-mail sont chiffrées : seul l'organisateur (avec son lien organisateur) peut les lire. Les prénoms, votes et activités restent lisibles par toute personne qui a le lien de vote.
 - Gardez votre lien organisateur en lieu sûr : sans lui, vous perdez vos droits et l'accès aux adresses e-mail. En bas de la page, « M'envoyer mon lien organisateur par e-mail » vous l'envoie dans votre boîte.
 - Sauvegarde : votre navigateur d'organisateur garde automatiquement une copie à chaque visite. Si le service de stockage perd les données, la page propose de la remettre. Vous pouvez aussi « Télécharger une sauvegarde » (fichier .json, e-mails chiffrés) et la « Restaurer » plus tard.
