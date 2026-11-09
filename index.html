@@ -959,7 +959,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     <div class="namebar">
     <form id="nameform">
       <div class="nf"><label for="f-name">Prénom</label><input type="text" id="f-name" maxlength="40" autocomplete="given-name" required></div>
-      <div class="nf"><label for="f-mail">E-mail</label><input type="email" id="f-mail" maxlength="120" autocomplete="email" required></div>
+      <div class="nf"><label for="f-mail">E-mail <span class="opt">(facultatif, pour l'invitation)</span></label><input type="email" id="f-mail" maxlength="120" autocomplete="email"></div>
       <button class="btn" type="submit" id="f-name-ok">Valider</button>
     </form>
     <div id="nameview" hidden>Vous votez en tant que <strong id="myname"></strong> · <button class="link" id="rename" type="button">Modifier</button></div>
@@ -1083,7 +1083,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
   const W = () => ui.actAs || S.me; // personne dont on modifie les votes (soi, ou un participant pour l'organisateur)
   // créateur du sondage (ou organisateur) : peut retenir la date / l'activité et clôturer ; rouvrir reste réservé à l'organisateur
   const mgr = ev => !!ev && (S.admin || (!!S.me && ev.createdBy === S.me));
-  const ready = () => !!(ui.actAs || (myName() && myMail()));
+  const ready = () => !!(ui.actAs || myName()); // l'e-mail est facultatif
   const nameOf = id => (S.votes[id]?.name || "").trim() || profiles[id]?.name || "Anonyme";
   const evOf = x => x.eventId || LEGACY;
   const curEv = () => S.events.find(e => e.id === S.cur) || null;
@@ -1196,7 +1196,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     const bar = $("#namebar");
     if (!S.me || !S.canWrite) { bar.hidden = true; return; }
     bar.hidden = false;
-    const n = myName(), mail = myMail(), editing = !n || !mail || ui.editingName;
+    const n = myName(), mail = myMail(), editing = !n || ui.editingName;
     $("#nameform").hidden = !editing; $("#nameview").hidden = editing;
     $("#myname").textContent = n + (mail ? ` (${mail})` : "");
     if (editing && document.activeElement !== $("#f-name") && !$("#f-name").value) $("#f-name").value = n;
@@ -1823,7 +1823,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
   function needName(){
     if (!$("#drawer").hidden) openDrawer(false);
     $("#namebar").classList.add("need");
-    $("#name-msg").textContent = "Entrez d'abord votre prénom et votre e-mail pour voter et recevoir l'invitation.";
+    $("#name-msg").textContent = "Entrez d'abord votre prénom pour voter.";
     $("#f-name").focus();
   }
   const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -1857,13 +1857,15 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     e.preventDefault();
     const n = $("#f-name").value.trim().replace(/\s+/g, " "), mail = $("#f-mail").value.trim();
     if (!n) { $("#name-msg").textContent = "Entrez votre prénom."; return; }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) { $("#name-msg").textContent = "Entrez une adresse e-mail valide pour recevoir l'invitation."; return; }
-    const mh = await mailHash(mail);
+    if (mail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) { $("#name-msg").textContent = "Cette adresse e-mail n'est pas valide (vous pouvez aussi la laisser vide)."; return; }
+    const mh = mail ? await mailHash(mail) : undefined;
     // déjà venu avec cet e-mail depuis un autre appareil ? on reprend la même fiche (pas de doublon)
-    const twin = window.awSetup && Object.entries(S.votes).find(([id, v]) => id !== S.me && v?.mh === mh);
+    const twin = mh && window.awSetup && Object.entries(S.votes).find(([id, v]) => id !== S.me && v?.mh === mh);
     if (twin && window.awSetup.adopt) { $("#name-msg").textContent = ""; $("#status").textContent = `Bon retour ${twin[1].name || ""} ! Vos réponses sont rechargées…`; window.awSetup.adopt(twin[0], mail); return; }
-    if (mail !== myMail()) { S.mails[S.me] = mail; localMails[S.me] = { m: mail, t: Date.now() }; db.doc("emails/" + S.me).set({ email: mail }).catch(() => setStatus("Votre e-mail n'a pas pu être enregistré. Réessayez.", true)); }
-    S.votes[S.me] = { ...(S.votes[S.me] || { answers: {} }), name: n, mh };
+    if (!mail && myMail()) { delete S.mails[S.me]; delete localMails[S.me]; db.doc("emails/" + S.me).delete().catch(() => {}); }
+    if (mail && mail !== myMail()) { S.mails[S.me] = mail; localMails[S.me] = { m: mail, t: Date.now() }; db.doc("emails/" + S.me).set({ email: mail }).catch(() => setStatus("Votre e-mail n'a pas pu être enregistré. Réessayez.", true)); }
+    const { mh: _old, ...prev } = S.votes[S.me] || { answers: {} };
+    S.votes[S.me] = { ...prev, name: n, ...(mh ? { mh } : {}) };
     ui.editingName = false; $("#name-msg").textContent = ""; $("#namebar").classList.remove("need");
     render(); saveMine();
   });
