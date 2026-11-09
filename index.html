@@ -546,6 +546,8 @@ header.site .hero{border-radius:0;padding:2.4rem max(clamp(1.0667rem, 3.5vw, 3.2
 .viewsw button{background:none;border:none;border-radius:0;padding:0.3333rem 0.9333rem;font-weight:600;font-size:.85rem;color:var(--muted)}
 .viewsw button[aria-pressed=true]{background:var(--accent);color:var(--accent-ink)}
 .calv{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:0.8rem;display:flex;flex-direction:column;gap:0.9333rem}
+/* calendrier sur toute la largeur du cadre (comme un agenda) : cases rectangulaires de hauteur fixe, plus de vide à droite */
+@media (min-width:640px){#calv .grid{max-width:none}#calv .cd{aspect-ratio:auto;height:3.6rem}}
 .caltool{display:flex;flex-wrap:wrap;gap:0.4rem;align-items:center;font-size:.85rem;position:sticky;top:env(safe-area-inset-top,0px);background:var(--surface);z-index:2;padding:2px 0 0.4rem;border-bottom:1px solid var(--line)}
 .caltool .cnt{font-weight:700;margin-right:0.2667rem}
 .caltool .hint{color:var(--muted);margin-right:0.2667rem}
