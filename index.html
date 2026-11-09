@@ -587,6 +587,10 @@ button.cd:disabled{cursor:default;opacity:.55}
 .bub:nth-child(3n+2){border-color:rgba(225,180,39,.7);background:rgba(225,180,39,.15)}
 .cal .w{font-size:.74rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;opacity:.8}
 .cal .d{font-family:var(--display);font-weight:800;font-size:1.15rem}
+.cal .yr{font-size:.62rem;font-weight:700;opacity:.75}
+.cal .mo{font-size:.68rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;opacity:.85;margin-top:1px}
+.monthhead{padding:.55rem .8rem .45rem;font-family:var(--display);font-weight:800;font-size:.95rem;color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--surface));border-top:1px solid var(--line)}
+.monthhead:first-child{border-top:0}
 .mid{min-width:0;display:flex;flex-direction:column;gap:0.2rem}
 .line1{display:flex;align-items:center;gap:0.5333rem;flex-wrap:wrap}
 .counts{display:flex;gap:0.5333rem;font-size:.81rem;font-variant-numeric:tabular-nums;color:var(--muted)}
@@ -1725,7 +1729,16 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     let leadId = null, best = 0;
     for (const d of dates) { if (!closed && d.date < today) continue; const t = tallies[d.id]; const sc = t.yes.length*2 + t.maybe.length; if (t.yes.length && sc > best) { best = sc; leadId = d.id; } }
 
-    setHTML(list, dates.map(d => {
+    // en tri par date : un intertitre « Décembre 2026 » à chaque nouveau mois
+    let prevMonth = "";
+    const multiYear = new Set(dates.map(d => d.date.slice(0, 4))).size > 1; // tri par votes : l'année s'affiche sur la vignette si le sondage chevauche deux années
+    const monthHead = d => {
+      if (ui.sort !== "date") return "";
+      const m = d.date.slice(0, 7); if (m === prevMonth) return ""; prevMonth = m;
+      const t = parseD(d.date).toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
+      return `<div class="monthhead">${esc(t.charAt(0).toUpperCase() + t.slice(1))}</div>`;
+    };
+    setHTML(list, dates.map(d => monthHead(d) + (() => {
       const t = tallies[d.id], total = t.yes.length + t.maybe.length + t.no.length;
       const pct = n => total ? (n/total*100).toFixed(1) : 0;
       const mine = S.me ? S.votes[W()]?.answers?.[d.id] : null;
@@ -1740,7 +1753,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
       const voting = canAct() && !past;
       return `<div class="item${lead?" lead":""}${chosen?" chosen":""}${past || (closed && !chosen) ?" past":""}">
         <div class="r">
-          <div class="cal" data-wd="${dt.getDay()}" aria-hidden="true"><div class="w">${dt.toLocaleDateString("fr-FR",{weekday:"short"}).replace(".","")}</div><div class="d">${dt.getDate()}</div></div>
+          <div class="cal" data-wd="${dt.getDay()}" aria-hidden="true"><div class="w">${dt.toLocaleDateString("fr-FR",{weekday:"short"}).replace(".","")}</div><div class="d">${dt.getDate()}</div><div class="mo">${dt.toLocaleDateString("fr-FR",{month:"short"}).replace(".","")}</div>${ui.sort !== "date" && multiYear ? `<div class="yr">${dt.getFullYear()}</div>` : ""}</div>
           <div class="mid">
             <div class="line1"><span style="position:absolute;left:-9999px">${esc(label)}</span>${hasAm ? `<span class="slot ${slotOf(d)}">${SLOT[slotOf(d)]}</span>` : ""}
               <span class="counts"><span class="y"><b>${t.yes.length}</b> dispo</span><span class="m"><b>${t.maybe.length}</b> ?</span><span class="n"><b>${t.no.length}</b> non</span></span>
@@ -1771,7 +1784,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
           </div>` : ""}
         </div>` : ""}
       </div>`;
-    }).join(""));
+    })()).join(""));
 
     renderCal();
     if (focusId){ const el = document.getElementById(focusId); if (el) el.focus(); }
