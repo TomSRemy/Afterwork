@@ -232,7 +232,6 @@
       if (op === "delete") no();
       if (!cur) { if (op !== "set" || d.createdBy !== uid) no(); return; }
       if (cur.createdBy !== uid) no();
-      if (cur.closed && d.closed === false) no();
       if ("createdBy" in d && d.createdBy !== uid) no();
     };
     return {
@@ -596,6 +595,7 @@ button.cd:disabled{cursor:default;opacity:.55}
 @keyframes savedin{0%{opacity:0;transform:translate(8px,-50%) scale(.9)}12%{opacity:1;transform:translate(0,-50%) scale(1.05)}20%{transform:translate(0,-50%) scale(1)}80%{opacity:1}100%{opacity:0}}
 @media (max-width:640px){.saved{right:0;top:auto;bottom:calc(100% + .35rem);transform:none;animation-name:savedinm}@keyframes savedinm{0%{opacity:0;transform:translateY(4px)}12%{opacity:1;transform:none}80%{opacity:1}100%{opacity:0}}}
 @media (prefers-reduced-motion:reduce){.saved,.cal .okb{animation:none}}
+.counts .of{color:var(--muted);font-weight:400}
 .cal .yr{font-size:.62rem;font-weight:700;opacity:.75}
 .cal .mo{font-size:.68rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;opacity:.85;margin-top:1px}
 .monthhead{padding:.55rem .8rem .45rem;font-family:var(--display);font-weight:800;font-size:.95rem;color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--surface));border-top:1px solid var(--line)}
@@ -1183,7 +1183,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     renderGuests(); renderEvEdit();
     if (!can) return;
     $("#evactions").innerHTML = !ev || !(S.admin || mgr(ev)) ? "" : (ev.closed
-      ? (S.admin ? `<button class="ghost" data-act="reopen">Rouvrir « ${esc(ev.title)} »</button>` : "")
+      ? `<button class="btn bigbtn" data-act="reopen">🔓 Rouvrir le sondage</button> <span class="hint">Les votes et commentaires sont conservés.</span>`
       : ui.confirmClose
         ? closeForm(ev)
         : `<button class="btn bigbtn" data-act="askclose">🔒 Clôturer le sondage</button> <button class="ghost" data-act="editev">✏️ Modifier le sondage</button>` + (invitees(ev).some(m => m.email) ? ` <button class="btn" data-act="mailgroup">✉ Envoyer l'invitation (${invitees(ev).filter(m => m.email).length})</button>${window.awSetup ? ` <button class="btn deskonly" data-act="emlgroup">Ouvrir dans Outlook classique</button>` : ""}${groupStatus(ev).pending.length && groupStatus(ev).done.length ? ` <button class="ghost" data-act="mailpending">Relancer ceux qui n'ont pas répondu (${groupStatus(ev).pending.length})</button>` : ""}` : ""))
@@ -1740,6 +1740,8 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
 
     // en tri par date : un intertitre « Décembre 2026 » à chaque nouveau mois
     let prevMonth = "";
+    // « X dispo sur Y » : Y = personnes ayant répondu à ce sondage (ou les invités du groupe, s'ils sont plus nombreux)
+    const nPart = Math.max(participants(ev.id).length, invitees(ev).length);
     const multiYear = new Set(dates.map(d => d.date.slice(0, 4))).size > 1; // tri par votes : l'année s'affiche sur la vignette si le sondage chevauche deux années
     const monthHead = d => {
       if (ui.sort !== "date") return "";
@@ -1765,7 +1767,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
           <div class="cal" data-wd="${dt.getDay()}" aria-hidden="true"><div class="w">${dt.toLocaleDateString("fr-FR",{weekday:"short"}).replace(".","")}</div><div class="d">${dt.getDate()}</div><div class="mo">${dt.toLocaleDateString("fr-FR",{month:"short"}).replace(".","")}</div>${ui.sort !== "date" && multiYear ? `<div class="yr">${dt.getFullYear()}</div>` : ""}${mine && !pendingVotes[W()] ? `<span class="okb${ui.flash?.id === d.id ? " new" : ""}" title="Réponse enregistrée">✓</span>` : ""}</div>
           <div class="mid">
             <div class="line1"><span style="position:absolute;left:-9999px">${esc(label)}</span>${hasAm ? `<span class="slot ${slotOf(d)}">${SLOT[slotOf(d)]}</span>` : ""}
-              <span class="counts"><span class="y"><b>${t.yes.length}</b> dispo</span><span class="m"><b>${t.maybe.length}</b> ?</span><span class="n"><b>${t.no.length}</b> non</span></span>
+              <span class="counts"><span class="y"><b>${t.yes.length}</b> dispo${nPart ? `<span class="of"> sur ${nPart}</span>` : ""}</span><span class="m"><b>${t.maybe.length}</b> ?</span><span class="n"><b>${t.no.length}</b> non</span></span>
               ${chosen ? "" : lead ? `<span class="badge lead">🔥 En tête</span>` : past ? `<span class="badge past">Passée</span>` : ""}
             </div>
             <div class="bar" aria-hidden="true"><span class="y" style="width:${pct(t.yes.length)}%"></span><span class="m" style="width:${pct(t.maybe.length)}%"></span><span class="n" style="width:${pct(t.no.length)}%"></span></div>
@@ -2104,6 +2106,7 @@ header.site .hero{padding-right:calc(max(clamp(1.0667rem, 3.5vw, 3.2rem), calc(5
     else if (act === "close" || act === "reopen") {
       ui.confirmClose = false;
       const upd = { closed: act === "close" };
+      if (act === "reopen") { upd.chosen = null; upd.chosenIdea = null; } // on revote : tous les votes sont gardés, seul le choix final est levé
       if (act === "close") {
         const d = document.querySelector('input[name="close-date"]:checked')?.value;
         const hasIdeas = !!document.querySelector('input[name="close-idea"]'), i = document.querySelector('input[name="close-idea"]:checked');
